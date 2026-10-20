@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
@@ -196,7 +197,21 @@ fun OtoCompleteApp(
     fun playSongQueue(song: Song) {
         currentSong = song
         controller?.run {
-            setMediaItems(allSongs.map { MediaItem.fromUri(it.uri) }, allSongs.indexOfFirst { it.id == song.id }.coerceAtLeast(0), 0L)
+            val items = allSongs.map { s ->
+                MediaItem.Builder()
+                    .setUri(s.uri)
+                    .setMediaId(s.id.toString())
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle(s.title)
+                            .setArtist(s.artist)
+                            .setAlbumTitle(s.album)
+                            .setArtworkUri(s.albumArtUri)
+                            .build()
+                    )
+                    .build()
+            }
+            setMediaItems(items, allSongs.indexOfFirst { it.id == song.id }.coerceAtLeast(0), 0L)
             prepare()
             play()
         }
