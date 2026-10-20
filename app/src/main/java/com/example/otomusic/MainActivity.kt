@@ -3,7 +3,6 @@ package com.example.otomusic
 import android.Manifest
 import android.content.ComponentName
 import android.content.ContentUris
-import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -42,9 +41,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -76,7 +77,7 @@ fun formatMillis(ms: Long): String {
 enum class BottomTab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Outlined.Home), ALBUMS("Albums", Icons.Outlined.Album), SONGS("Songs", Icons.Outlined.MusicNote), PLAYLISTS("Playlists", Icons.Outlined.QueueMusic), ARTISTS("Artists", Icons.Outlined.Person)
 }
-enum class OverlayScreen { NONE, SETTINGS, THEMES }
+enum class OverlayScreen { NONE, SETTINGS, THEMES, LYRICS, EDIT_LYRICS }
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -94,7 +95,7 @@ class MainActivity : ComponentActivity() {
             val bgColor = if (amoledDark) Color(0xFF000000) else Color(0xFF131118)
             val surfaceColor = if (amoledDark) Color(0xFF121016) else Color(0xFF211E29)
 
-            MaterialTheme(colorScheme = darkColorScheme(background = bgColor, surface = surfaceColor, primary = accentColor)) {
+            MaterialTheme(colorScheme = darkColorScheme(background = bgColor, surface = surfaceColor, primary = accentColor, secondaryContainer = Color(0xFF282433))) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     OtoCompleteApp(controller, { fetchSongs() }, accentColor, { accentColor = it }, amoledDark, { amoledDark = it })
                 }
@@ -153,7 +154,10 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
     }
 
     BackHandler(enabled = showNowPlayingFull || activeOverlay != OverlayScreen.NONE) {
-        if (showNowPlayingFull) showNowPlayingFull = false else activeOverlay = OverlayScreen.NONE
+        if (activeOverlay == OverlayScreen.EDIT_LYRICS) activeOverlay = OverlayScreen.LYRICS
+        else if (activeOverlay == OverlayScreen.LYRICS) activeOverlay = OverlayScreen.NONE
+        else if (showNowPlayingFull) showNowPlayingFull = false 
+        else activeOverlay = OverlayScreen.NONE
     }
 
     Scaffold(
@@ -177,7 +181,7 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                 }
                 if (activeOverlay == OverlayScreen.NONE) {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.background) {
-                        BottomTab.entries.forEach { tab -> NavigationBarItem(selected = currentTab == tab, onClick = { currentTab = tab }, icon = { Icon(tab.icon, null) }, label = { Text(tab.label, fontSize = 11.sp) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = Color.White, selectedTextColor = Color.White, unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray, indicatorColor = Color(0xFF282433))) }
+                        BottomTab.entries.forEach { tab -> NavigationBarItem(selected = currentTab == tab, onClick = { currentTab = tab }, icon = { Icon(tab.icon, null) }, label = { Text(tab.label, fontSize = 11.sp) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = Color.White, selectedTextColor = Color.White, unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray, indicatorColor = MaterialTheme.colorScheme.secondaryContainer)) }
                     }
                 }
             }
@@ -187,9 +191,10 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
             when (activeOverlay) {
                 OverlayScreen.SETTINGS -> SettingsScreen(onBack = { activeOverlay = OverlayScreen.NONE }, onOpenThemes = { activeOverlay = OverlayScreen.THEMES })
                 OverlayScreen.THEMES -> ThemesScreen(accentColor, onAccentChange, amoledDark, onAmoledChange, onBack = { activeOverlay = OverlayScreen.SETTINGS })
+                OverlayScreen.LYRICS -> currentSong?.let { LyricsDisplayScreen(it, onEdit = { activeOverlay = OverlayScreen.EDIT_LYRICS }, onBack = { activeOverlay = OverlayScreen.NONE }) }
+                OverlayScreen.EDIT_LYRICS -> currentSong?.let { EditLyricsScreen(it, accentColor, onBack = { activeOverlay = OverlayScreen.LYRICS }) }
                 OverlayScreen.NONE -> {
                     Column {
-                        // FUNCTIONAL SEARCH BAR
                         Surface(modifier = Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surface) {
                             Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = { activeOverlay = OverlayScreen.SETTINGS }) { Icon(Icons.Default.Menu, null, tint = Color.LightGray) }
@@ -198,7 +203,6 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                             }
                         }
 
-                        // BOTTOM TAB NAVIGATION LOGIC
                         val filteredSongs = allSongs.filter { it.title.contains(searchQuery, true) || it.artist.contains(searchQuery, true) }
                         when (currentTab) {
                             BottomTab.SONGS -> LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -209,7 +213,7 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                                         Spacer(Modifier.width(14.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(song.title, color = if (isSelected) accentColor else Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text("${song.artist} •${song.formattedDuration}", color = Color.Gray, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text("${song.artist} • ${song.formattedDuration}", color = Color.Gray, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
                                 }
@@ -251,7 +255,7 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                         Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = { showNowPlayingFull = false }) { Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White, modifier = Modifier.size(32.dp)) }
                             Text("Now Playing", color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            IconButton(onClick = { /* Todo: Open Lyrics Overlay */ }) { Icon(Icons.Outlined.Lyrics, "Lyrics", tint = Color.White) }
+                            IconButton(onClick = { activeOverlay = OverlayScreen.LYRICS }) { Icon(Icons.Outlined.Lyrics, "Lyrics", tint = Color.White) }
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
                             AsyncImage(model = song.albumArtUri, contentDescription = null, modifier = Modifier.aspectRatio(1f).fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF25232E)), contentScale = ContentScale.Crop)
@@ -269,4 +273,160 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = { controller?.seekToPrevious() }) { Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(40.dp)) }
                                 Surface(shape = CircleShape, color = accentColor, modifier = Modifier.size(72.dp).clickable { controller?.let { if (it.isPlaying) it.pause() else it.play() } }) {
-                                    Box(content
+                                    Box(contentAlignment = Alignment.Center) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color(0xFF1B1429), modifier = Modifier.size(36.dp)) }
+                                }
+                                IconButton(onClick = { controller?.seekToNext() }) { Icon(Icons.Default.SkipNext, null, tint = Color.White, modifier = Modifier.size(40.dp)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LyricsDisplayScreen(song: Song, onEdit: () -> Unit, onBack: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            IconButton(onClick = onBack, modifier = Modifier.padding(16.dp)) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("No embedded lyrics found", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Tap to edit", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp, textDecoration = TextDecoration.Underline, modifier = Modifier.clickable { onEdit() })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EditLyricsScreen(song: Song, accentColor: Color, onBack: () -> Unit) {
+    var showSaveDialog by remember { mutableStateOf(false) }
+
+    if (showSaveDialog) {
+        Dialog(onDismissRequest = { showSaveDialog = false }) {
+            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Column(modifier = Modifier.padding(24.dp)) {
+                    Text("Save lyrics", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Embed lyrics in the song?", color = Color.LightGray, fontSize = 14.sp)
+                    Spacer(Modifier.height(24.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        OutlinedButton(onClick = { showSaveDialog = false }, border = null, colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor)) { Text("Cancel") }
+                        Button(onClick = { showSaveDialog = false }, colors = ButtonDefaults.buttonColors(containerColor = accentColor, contentColor = Color(0xFF1B1429))) { Text("Save") }
+                    }
+                }
+            }
+        }
+    }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
+                Text("Edit lyrics", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+            }
+            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                AsyncImage(model = song.albumArtUri, contentDescription = null, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                Column(modifier = Modifier.padding(start = 16.dp)) {
+                    Text(song.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Text(song.artist, color = Color.Gray, fontSize = 14.sp, maxLines = 1)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                EditLyricsOption(Icons.Outlined.ContentPaste, "Paste from clipboard", "Plain or .lrc")
+                EditLyricsOption(Icons.Outlined.Search, "Search online", "Plain or synced")
+                EditLyricsOption(Icons.Outlined.Edit, "Start new", "Write from scratch")
+                Text("0 lines", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.align(Alignment.End).padding(end = 16.dp, top = 8.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Search, null, tint = Color.White)
+                    Icon(Icons.Outlined.Download, null, tint = Color.White)
+                    Icon(Icons.Outlined.ContentPaste, null, tint = Color.White)
+                    Icon(Icons.Outlined.Save, null, tint = Color.White)
+                    IconButton(onClick = { showSaveDialog = true }, modifier = Modifier.background(accentColor.copy(alpha = 0.5f), RoundedCornerShape(12.dp))) {
+                        Icon(Icons.Outlined.Save, null, tint = accentColor)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EditLyricsOption(icon: ImageVector, title: String, subtitle: String) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable { }) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, tint = Color.LightGray)
+            Column(modifier = Modifier.weight(1f).padding(start = 16.dp)) {
+                Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(subtitle, color = Color.Gray, fontSize = 12.sp)
+            }
+            Icon(Icons.Default.ChevronRight, null, tint = Color.Gray)
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(onBack: () -> Unit, onOpenThemes: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
+            Text("Settings", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+        }
+        Spacer(Modifier.height(16.dp))
+        SettingsItem(Icons.Outlined.Palette, "Themes & Colors", "Change theme, accent color and highlight color", onClick = onOpenThemes)
+        SettingsItem(Icons.Outlined.PlayCircle, "Now Playing", "Customize the now playing screen")
+        SettingsItem(Icons.Outlined.Headset, "Audio", "Equalizer, crossfade, and playback settings")
+        SettingsItem(Icons.Outlined.LibraryMusic, "Library", "Scan media and manage ignored folders")
+        SettingsItem(Icons.Outlined.Image, "Album Art", "Auto download and image quality")
+        SettingsItem(Icons.Outlined.Info, "About", "Version 1.0 - Offline Mode")
+    }
+}
+
+@Composable
+fun SettingsItem(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit = {}) {
+    Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFF211E29), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable { onClick() }) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, tint = Color.LightGray)
+            Column(modifier = Modifier.weight(1f).padding(start = 16.dp)) {
+                Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(subtitle, color = Color.Gray, fontSize = 12.sp)
+            }
+            Icon(Icons.Default.ChevronRight, null, tint = Color.Gray)
+        }
+    }
+}
+
+@Composable
+fun ThemesScreen(accentColor: Color, onSelectAccent: (Color) -> Unit, amoledDark: Boolean, onToggleAmoled: (Boolean) -> Unit, onBack: () -> Unit) {
+    val palette = listOf(Color(0xFFD0BCFF), Color(0xFFFFB4AB), Color(0xFFFFD8E4), Color(0xFFA8C7FA), Color(0xFF80CBC4), Color(0xFFA5D6A7), Color(0xFFFFE082), Color(0xFFFFAB91))
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
+            Text("Themes & Colors", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+        }
+        Spacer(Modifier.height(16.dp))
+        Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFF211E29), modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Use extra dark colors", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text("Use darker colors for AMOLED screens.", color = Color.Gray, fontSize = 12.sp)
+                }
+                Switch(checked = amoledDark, onCheckedChange = onToggleAmoled)
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Text("Accent Color", color = Color.Gray, fontSize = 14.sp, modifier = Modifier.padding(start = 16.dp, bottom = 8.dp))
+        Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFF211E29), modifier = Modifier.fillMaxWidth()) {
+            LazyRow(contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                items(palette) { color -> Box(modifier = Modifier.size(52.dp).clip(CircleShape).background(color).border(if (accentColor == color) 3.dp else 0.dp, Color.White, CircleShape).clickable { onSelectAccent(color) }) }
+            }
+        }
+    }
+}
