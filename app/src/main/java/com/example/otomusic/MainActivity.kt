@@ -18,6 +18,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -55,9 +56,7 @@ import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
 import java.util.*
 
 data class Song(
@@ -119,7 +118,6 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, accentColor: Color, onAccentChange: (Color) -> Unit, amoledDark: Boolean, onAmoledChange: (Boolean) -> Unit) {
-    val scope = rememberCoroutineScope()
     var allSongs by remember { mutableStateOf(emptyList<Song>()) }
     var currentTab by remember { mutableStateOf(BottomTab.SONGS) }
     var activeOverlay by remember { mutableStateOf(OverlayScreen.NONE) }
