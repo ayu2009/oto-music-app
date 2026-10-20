@@ -3,6 +3,7 @@ package com.example.otomusic
 import android.Manifest
 import android.content.ComponentName
 import android.content.ContentUris
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -40,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -76,7 +78,7 @@ fun formatMillis(ms: Long): String {
 enum class BottomTab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Outlined.Home), ALBUMS("Albums", Icons.Outlined.Album), SONGS("Songs", Icons.Outlined.MusicNote), PLAYLISTS("Playlists", Icons.Outlined.QueueMusic), ARTISTS("Artists", Icons.Outlined.Person)
 }
-enum class OverlayScreen { NONE, SETTINGS, THEMES, LYRICS, EDIT_LYRICS }
+enum class OverlayScreen { NONE, SETTINGS, THEMES, LYRICS, EDIT_LYRICS, LIBRARY_SETTINGS }
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -118,7 +120,12 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, accentColor: Color, onAccentChange: (Color) -> Unit, amoledDark: Boolean, onAmoledChange: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("oto_prefs", Context.MODE_PRIVATE)
+    
     var allSongs by remember { mutableStateOf(emptyList<Song>()) }
+    var ignoredFolders by remember { mutableStateOf(prefs.getStringSet("ignored_folders", emptySet())?.toSet() ?: emptySet()) }
+    
     var currentTab by remember { mutableStateOf(BottomTab.SONGS) }
     var activeOverlay by remember { mutableStateOf(OverlayScreen.NONE) }
     var currentSong by remember { mutableStateOf<Song?>(null) }
@@ -136,17 +143,29 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
             override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
             override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
                 val idx = controller?.currentMediaItemIndex ?: return
-                if (idx in allSongs.indices) currentSong = allSongs[idx]
+                // Map the active song back from the actual queue
+                if (idx >= 0) currentSong = allSongs.find { it.id.toString() == item?.mediaId }
             }
         }
         controller?.addListener(listener)
         onDispose { controller?.removeListener(listener) }
     }
+    
+    // Filter out ignored folders
+    val activeSongs = allSongs.filter { File(it.path).parent !in ignoredFolders }
+    // Get all unique folder paths for the settings screen
+    val allFolders = remember(allSongs) { allSongs.mapNotNull { File(it.path).parent }.distinct().sorted() }
+
+    val toggleFolderIgnore: (String) -> Unit = { path ->
+        val newSet = if (ignoredFolders.contains(path)) ignoredFolders - path else ignoredFolders + path
+        ignoredFolders = newSet
+        prefs.edit().putStringSet("ignored_folders", newSet).apply()
+    }
 
     fun playSong(song: Song) {
         currentSong = song
         controller?.run {
-            setMediaItems(allSongs.map { s -> MediaItem.Builder().setUri(s.uri).setMediaId(s.id.toString()).setMediaMetadata(MediaMetadata.Builder().setTitle(s.title).setArtist(s.artist).setAlbumTitle(s.album).setArtworkUri(s.albumArtUri).build()).build() }, allSongs.indexOfFirst { it.id == song.id }.coerceAtLeast(0), 0L)
+            setMediaItems(activeSongs.map { s -> MediaItem.Builder().setUri(s.uri).setMediaId(s.id.toString()).setMediaMetadata(MediaMetadata.Builder().setTitle(s.title).setArtist(s.artist).setAlbumTitle(s.album).setArtworkUri(s.albumArtUri).build()).build() }, activeSongs.indexOfFirst { it.id == song.id }.coerceAtLeast(0), 0L)
             prepare(); play()
         }
     }
@@ -154,6 +173,7 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
     BackHandler(enabled = showNowPlayingFull || activeOverlay != OverlayScreen.NONE) {
         if (activeOverlay == OverlayScreen.EDIT_LYRICS) activeOverlay = OverlayScreen.LYRICS
         else if (activeOverlay == OverlayScreen.LYRICS) activeOverlay = OverlayScreen.NONE
+        else if (activeOverlay == OverlayScreen.THEMES || activeOverlay == OverlayScreen.LIBRARY_SETTINGS) activeOverlay = OverlayScreen.SETTINGS
         else if (showNowPlayingFull) showNowPlayingFull = false 
         else activeOverlay = OverlayScreen.NONE
     }
@@ -187,8 +207,9 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (activeOverlay) {
-                OverlayScreen.SETTINGS -> SettingsScreen(onBack = { activeOverlay = OverlayScreen.NONE }, onOpenThemes = { activeOverlay = OverlayScreen.THEMES })
+                OverlayScreen.SETTINGS -> SettingsScreen(onBack = { activeOverlay = OverlayScreen.NONE }, onOpenThemes = { activeOverlay = OverlayScreen.THEMES }, onOpenLibrary = { activeOverlay = OverlayScreen.LIBRARY_SETTINGS })
                 OverlayScreen.THEMES -> ThemesScreen(accentColor, onAccentChange, amoledDark, onAmoledChange, onBack = { activeOverlay = OverlayScreen.SETTINGS })
+                OverlayScreen.LIBRARY_SETTINGS -> LibrarySettingsScreen(folders = allFolders, ignoredFolders = ignoredFolders, onToggleFolder = toggleFolderIgnore, onBack = { activeOverlay = OverlayScreen.SETTINGS })
                 OverlayScreen.LYRICS -> currentSong?.let { LyricsDisplayScreen(it, onEdit = { activeOverlay = OverlayScreen.EDIT_LYRICS }, onBack = { activeOverlay = OverlayScreen.NONE }) }
                 OverlayScreen.EDIT_LYRICS -> currentSong?.let { EditLyricsScreen(it, accentColor, onBack = { activeOverlay = OverlayScreen.LYRICS }) }
                 OverlayScreen.NONE -> {
@@ -201,7 +222,7 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                             }
                         }
 
-                        val filteredSongs = allSongs.filter { it.title.contains(searchQuery, true) || it.artist.contains(searchQuery, true) }
+                        val filteredSongs = activeSongs.filter { it.title.contains(searchQuery, true) || it.artist.contains(searchQuery, true) }
                         when (currentTab) {
                             BottomTab.SONGS -> LazyColumn(modifier = Modifier.fillMaxSize()) {
                                 items(filteredSongs) { song ->
@@ -252,20 +273,16 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     Column(modifier = Modifier.fillMaxSize()) {
                         
-                        // Header
                         Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Start) {
                             IconButton(onClick = { showNowPlayingFull = false }) { Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White, modifier = Modifier.size(32.dp)) }
                         }
 
-                        // Tablet Split View
                         Row(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
                             
-                            // Left Side: Album Art
                             Box(modifier = Modifier.weight(1f).fillMaxHeight().padding(24.dp), contentAlignment = Alignment.Center) {
                                 AsyncImage(model = song.albumArtUri, contentDescription = null, modifier = Modifier.aspectRatio(1f).fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF25232E)), contentScale = ContentScale.Crop)
                             }
 
-                            // Right Side: Controls
                             Column(modifier = Modifier.weight(1f).fillMaxHeight().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                                 
                                 Slider(value = currentPosition.toFloat(), onValueChange = { controller?.seekTo(it.toLong()); currentPosition = it.toLong() }, valueRange = 0f..song.duration.coerceAtLeast(1L).toFloat(), colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor, inactiveTrackColor = Color.DarkGray), modifier = Modifier.fillMaxWidth())
@@ -314,6 +331,38 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
                                     IconButton(onClick = { }) { Icon(Icons.Outlined.MoreHoriz, "More", tint = Color.LightGray) }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- NEW IGNORED FOLDERS SCREEN ---
+@Composable
+fun LibrarySettingsScreen(folders: List<String>, ignoredFolders: Set<String>, onToggleFolder: (String) -> Unit, onBack: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
+            Text("Ignored Folders", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+        }
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(folders) { folderPath ->
+                val isIgnored = ignoredFolders.contains(folderPath)
+                var expanded by remember { mutableStateOf(false) }
+                
+                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Folder, null, tint = if (isIgnored) Color.DarkGray else Color.LightGray, modifier = Modifier.size(40.dp))
+                    Column(modifier = Modifier.weight(1f).padding(horizontal = 16.dp)) {
+                        Text(File(folderPath).name, color = if (isIgnored) Color.Gray else Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(folderPath, color = Color.DarkGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Box {
+                        IconButton(onClick = { expanded = true }) { Icon(Icons.Default.MoreVert, null, tint = Color.LightGray) }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.background(Color(0xFF282433))) {
+                            DropdownMenuItem(text = { Text("Ignore", color = Color.White) }, onClick = { if (!isIgnored) onToggleFolder(folderPath); expanded = false })
+                            DropdownMenuItem(text = { Text("Reconsider", color = Color.White) }, onClick = { if (isIgnored) onToggleFolder(folderPath); expanded = false })
                         }
                     }
                 }
@@ -410,7 +459,7 @@ fun EditLyricsOption(icon: ImageVector, title: String, subtitle: String) {
 }
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onOpenThemes: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onOpenThemes: () -> Unit, onOpenLibrary: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = Color.White) }
@@ -420,7 +469,7 @@ fun SettingsScreen(onBack: () -> Unit, onOpenThemes: () -> Unit) {
         SettingsItem(Icons.Outlined.Palette, "Themes & Colors", "Change theme, accent color and highlight color", onClick = onOpenThemes)
         SettingsItem(Icons.Outlined.PlayCircle, "Now Playing", "Customize the now playing screen")
         SettingsItem(Icons.Outlined.Headset, "Audio", "Equalizer, crossfade, and playback settings")
-        SettingsItem(Icons.Outlined.LibraryMusic, "Library", "Scan media and manage ignored folders")
+        SettingsItem(Icons.Outlined.LibraryMusic, "Library", "Scan media and manage ignored folders", onClick = onOpenLibrary)
         SettingsItem(Icons.Outlined.Image, "Album Art", "Auto download and image quality")
         SettingsItem(Icons.Outlined.Info, "About", "Version 1.0 - Offline Mode")
     }
