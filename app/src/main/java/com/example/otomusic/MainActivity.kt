@@ -246,34 +246,73 @@ fun OtoCompleteApp(controller: MediaController?, loadSongs: () -> List<Song>, ac
             }
         }
 
+        // SPLIT-SCREEN TABLET "NOW PLAYING" LAYOUT
         AnimatedVisibility(visible = showNowPlayingFull && currentSong != null, enter = slideInVertically(initialOffsetY = { it }), exit = slideOutVertically(targetOffsetY = { it })) {
             currentSong?.let { song ->
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     Column(modifier = Modifier.fillMaxSize()) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        
+                        // Header
+                        Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Start) {
                             IconButton(onClick = { showNowPlayingFull = false }) { Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White, modifier = Modifier.size(32.dp)) }
-                            Text("Now Playing", color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            IconButton(onClick = { activeOverlay = OverlayScreen.LYRICS }) { Icon(Icons.Outlined.Lyrics, "Lyrics", tint = Color.White) }
                         }
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
-                            AsyncImage(model = song.albumArtUri, contentDescription = null, modifier = Modifier.aspectRatio(1f).fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF25232E)), contentScale = ContentScale.Crop)
-                        }
-                        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 24.dp)) {
-                            Text(song.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(song.artist, color = accentColor, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Spacer(Modifier.height(24.dp))
-                            Slider(value = currentPosition.toFloat(), onValueChange = { controller?.seekTo(it.toLong()); currentPosition = it.toLong() }, valueRange = 0f..song.duration.coerceAtLeast(1L).toFloat(), colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor))
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(formatMillis(currentPosition), color = Color.LightGray, fontSize = 12.sp)
-                                Text(song.formattedDuration, color = Color.LightGray, fontSize = 12.sp)
+
+                        // Tablet Split View
+                        Row(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
+                            
+                            // Left Side: Album Art
+                            Box(modifier = Modifier.weight(1f).fillMaxHeight().padding(24.dp), contentAlignment = Alignment.Center) {
+                                AsyncImage(model = song.albumArtUri, contentDescription = null, modifier = Modifier.aspectRatio(1f).fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF25232E)), contentScale = ContentScale.Crop)
                             }
-                            Spacer(Modifier.height(16.dp))
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { controller?.seekToPrevious() }) { Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(40.dp)) }
-                                Surface(shape = CircleShape, color = accentColor, modifier = Modifier.size(72.dp).clickable { controller?.let { if (it.isPlaying) it.pause() else it.play() } }) {
-                                    Box(contentAlignment = Alignment.Center) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color(0xFF1B1429), modifier = Modifier.size(36.dp)) }
+
+                            // Right Side: Controls
+                            Column(modifier = Modifier.weight(1f).fillMaxHeight().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                
+                                Slider(value = currentPosition.toFloat(), onValueChange = { controller?.seekTo(it.toLong()); currentPosition = it.toLong() }, valueRange = 0f..song.duration.coerceAtLeast(1L).toFloat(), colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor, inactiveTrackColor = Color.DarkGray), modifier = Modifier.fillMaxWidth())
+                                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).offset(y = (-12).dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(formatMillis(currentPosition), color = Color.LightGray, fontSize = 12.sp)
+                                    Text(song.formattedDuration, color = Color.LightGray, fontSize = 12.sp)
                                 }
-                                IconButton(onClick = { controller?.seekToNext() }) { Icon(Icons.Default.SkipNext, null, tint = Color.White, modifier = Modifier.size(40.dp)) }
+
+                                Spacer(Modifier.height(16.dp))
+
+                                Text(song.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(4.dp))
+                                Text(song.artist, color = Color.LightGray, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+
+                                Spacer(Modifier.height(32.dp))
+
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.Refresh, null, tint = Color.Gray, modifier = Modifier.size(28.dp)) }
+                                    IconButton(onClick = { controller?.seekToPrevious() }) { Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(36.dp)) }
+                                    Surface(shape = CircleShape, color = accentColor, modifier = Modifier.size(72.dp).clickable { controller?.let { if (it.isPlaying) it.pause() else it.play() } }) {
+                                        Box(contentAlignment = Alignment.Center) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color(0xFF1B1429), modifier = Modifier.size(36.dp)) }
+                                    }
+                                    IconButton(onClick = { controller?.seekToNext() }) { Icon(Icons.Default.SkipNext, null, tint = Color.White, modifier = Modifier.size(36.dp)) }
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.SyncAlt, null, tint = Color.Gray, modifier = Modifier.size(28.dp)) }
+                                }
+
+                                Spacer(Modifier.height(32.dp))
+
+                                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Outlined.VolumeMute, null, tint = Color.LightGray)
+                                    Slider(value = 0.5f, onValueChange = {}, colors = SliderDefaults.colors(thumbColor = Color.LightGray, activeTrackColor = Color.LightGray, inactiveTrackColor = Color.DarkGray), modifier = Modifier.weight(1f).padding(horizontal = 16.dp))
+                                    Icon(Icons.Outlined.VolumeUp, null, tint = Color.LightGray)
+                                }
+
+                                Spacer(Modifier.height(24.dp))
+
+                                Text("${song.extension} • ${song.bitrateKbps} kb/s • 44.1 kHz", color = Color.LightGray, fontSize = 13.sp)
+
+                                Spacer(Modifier.height(32.dp))
+
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { activeOverlay = OverlayScreen.LYRICS }) { Icon(Icons.Outlined.SpeakerNotesOff, "Lyrics", tint = Color.LightGray) }
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.FavoriteBorder, "Favorite", tint = Color.LightGray) }
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.DarkMode, "Sleep", tint = Color.LightGray) }
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.QueueMusic, "Queue", tint = Color.LightGray) }
+                                    IconButton(onClick = { }) { Icon(Icons.Outlined.MoreHoriz, "More", tint = Color.LightGray) }
+                                }
                             }
                         }
                     }
