@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
 import android.Manifest
@@ -15,7 +17,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
-import androidx.activity.BackHandler
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -389,7 +391,7 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
     fun recordPlay(song: Song) {
         historyIds.remove(song.id)
         historyIds.add(0, song.id)
-        if (historyIds.size > 100) historyIds.removeLast()
+        if (historyIds.size > 100) historyIds.removeAt(historyIds.lastIndex)
         prefs.edit().putString("history_csv", historyIds.joinToString(",")).apply()
 
         val newCount = (playCounts[song.id] ?: 0) + 1
