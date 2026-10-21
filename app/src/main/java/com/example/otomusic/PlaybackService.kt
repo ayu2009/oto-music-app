@@ -1,3 +1,4 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
 import android.app.PendingIntent
@@ -32,7 +33,6 @@ class PlaybackService : MediaSessionService() {
         const val KEY_AUDIO_SESSION_ID = "KEY_AUDIO_SESSION_ID"
     }
 
-    @UnstableApi
     override fun onCreate() {
         super.onCreate()
 
