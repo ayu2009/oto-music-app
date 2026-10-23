@@ -73,6 +73,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.URL
+import java.net.URLEncoder
 import javax.net.ssl.HttpsURLConnection
 
 class PlaybackService : MediaSessionService() {
@@ -450,7 +451,7 @@ fun OtoAutoFindLyricsEmptyState(state: OtoUiState, song: Song) {
     val ctx = LocalContext.current
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            text = if (state.isAiBusy.value) "Finding lyrics with Gemini AI..." else "No embedded lyrics found",
+            text = if (state.isAiBusy.value) "Finding lyrics with AI..." else "No embedded lyrics found",
             color = state.textPrimary,
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium
@@ -459,7 +460,7 @@ fun OtoAutoFindLyricsEmptyState(state: OtoUiState, song: Song) {
         Button(
             enabled = !state.isAiBusy.value,
             onClick = {
-                if (state.geminiApiKey.value.isBlank()) {
+                if (false) {
                     state.showGeminiKeyDialog.value = true
                 } else {
                     state.isAiBusy.value = true
@@ -510,7 +511,7 @@ fun OtoAutoFindLyricsEditButton(
     OutlinedButton(
         enabled = !state.isAiBusy.value,
         onClick = {
-            if (state.geminiApiKey.value.isBlank()) {
+            if (false) {
                 state.showGeminiKeyDialog.value = true
             } else {
                 state.isAiBusy.value = true
@@ -621,10 +622,6 @@ fun OtoAiSmartDjDialog(
     )
 
     fun triggerDjMix(promptToRun: String) {
-        if (state.geminiApiKey.value.isBlank()) {
-            state.showGeminiKeyDialog.value = true
-            return
-        }
         if (state.allSongs.isEmpty()) {
             Toast.makeText(ctx, "No offline songs found in library yet!", Toast.LENGTH_SHORT).show()
             return
@@ -775,14 +772,14 @@ fun OtoGeminiApiKeyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Paste your free Gemini API key from Google AI Studio (aistudio.google.com/app/apikey). Uses direct HTTPS with zero Google Play Services and zero background RAM.",
+                    text = "Your key is pre-configured! You can also paste an AI Studio key (aistudio.google.com/app/apikey) here anytime.",
                     color = state.textSecondary,
                     fontSize = 13.sp
                 )
                 OutlinedTextField(
                     value = keyInput,
                     onValueChange = { keyInput = it },
-                    placeholder = { Text("AIzaSy...") },
+                    placeholder = { Text("API Key...") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -806,24 +803,23 @@ fun OtoGeminiApiKeyDialog(
 }
 
 object GeminiAiHelper {
+    const val DEFAULT_KEY = "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ"
     private val MODELS = listOf("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
 
     suspend fun callGeminiPrompt(apiKey: String, prompt: String): Result<String> = withContext(Dispatchers.IO) {
-        val cleanKey = apiKey.trim()
-        if (cleanKey.isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("API key is empty"))
-        }
+        val cleanKey = apiKey.trim().ifEmpty { DEFAULT_KEY }
 
         var lastError: Exception? = null
         for (model in MODELS) {
             try {
-                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$cleanKey"
+                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${URLEncoder.encode(cleanKey, "UTF-8")}"
                 val conn = (URL(endpoint).openConnection() as HttpsURLConnection).apply {
                     requestMethod = "POST"
-                    connectTimeout = 12000
-                    readTimeout = 20000
+                    connectTimeout = 10000
+                    readTimeout = 16000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                    setRequestProperty("x-goog-api-key", cleanKey)
                 }
 
                 val payload = JSONObject().apply {
@@ -870,23 +866,54 @@ object GeminiAiHelper {
         Result.failure(lastError ?: IllegalStateException("Failed to reach Gemini API"))
     }
 
-    suspend fun fetchLyricsForSong(apiKey: String, song: Song): Result<String> {
+    suspend fun fetchLyricsForSong(apiKey: String, song: Song): Result<String> = withContext(Dispatchers.IO) {
+        // 1. Try fast open-source LRCLIB lookup first
+        try {
+            val cleanTitle = song.title
+                .replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")
+                .trim()
+                .ifEmpty { song.title }
+            val cleanArtist = if (song.artist.equals("<unknown>", ignoreCase = true)) "" else song.artist
+            val q = URLEncoder.encode("$cleanTitle $cleanArtist".trim(), "UTF-8")
+            val lrcUrl = "https://lrclib.net/api/search?q=$q"
+            val conn = (URL(lrcUrl).openConnection() as HttpsURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 12000
+                setRequestProperty("User-Agent", "OtoMusicOfflinePlayer/2.2")
+            }
+            if (conn.responseCode in 200..299) {
+                val body = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
+                val arr = JSONArray(body)
+                if (arr.length() > 0) {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.getJSONObject(i)
+                        val plain = item.optString("plainLyrics", "").trim()
+                        val synced = item.optString("syncedLyrics", "").trim()
+                            .replace(Regex("\\[\\d{2}:\\d{2}\\.\\d{2,3}\\]\\s*"), "")
+                            .trim()
+                        if (plain.isNotEmpty()) return@withContext Result.success(plain)
+                        if (synced.isNotEmpty()) return@withContext Result.success(synced)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        // 2. Try Gemini API
         val cleanArtist = if (song.artist.equals("<unknown>", ignoreCase = true)) "" else " by \"${song.artist}\""
         val prompt = """
             Find the complete, accurate lyrics for the song "${song.title}"$cleanArtist.
-            Rules:
-            - Output ONLY the plain song lyrics line by line.
-            - Do NOT include markdown code blocks, titles, or introductory commentary.
-            - If you are not sure of exact word-for-word lyrics, provide the known verses/chorus cleanly.
+            Output ONLY the plain song lyrics line by line with no markdown or commentary.
         """.trimIndent()
-        return callGeminiPrompt(apiKey, prompt)
+        callGeminiPrompt(apiKey, prompt)
     }
 
     suspend fun buildSmartDjQueue(
         apiKey: String,
         moodPrompt: String,
         library: List<Song>
-    ): Result<Pair<String, List<Song>>> {
+    ): Result<Pair<String, List<Song>>> = withContext(Dispatchers.IO) {
         val sample = library.take(150)
         val catalogLines = sample.joinToString("\n") { s ->
             "${s.id}|${s.title.replace("|", " ")}|${s.artist.replace("|", " ")}|${s.genre.replace("|", " ")}"
@@ -904,10 +931,12 @@ object GeminiAiHelper {
             Line 2: ONLY the comma-separated numerical IDs of the selected songs in playback order (for example: 102,45,88,19).
         """.trimIndent()
 
-        return callGeminiPrompt(apiKey, prompt).mapCatching { reply ->
+        val geminiRes = callGeminiPrompt(apiKey, prompt)
+        if (geminiRes.isSuccess) {
+            val reply = geminiRes.getOrNull().orEmpty()
             val nonBlank = reply.lines().map { it.trim() }.filter { it.isNotEmpty() }
             val intro = nonBlank.firstOrNull()?.removePrefix("Line 1:")?.trim()
-                ?: "Spinning your custom AI DJ mix!"
+                ?: "Spinning your custom AI DJ mix for $moodPrompt!"
             val idsText = nonBlank.drop(1).joinToString(" ")
             val idMap = library.associateBy { it.id }
             val picked = Regex("\\d+").findAll(idsText)
@@ -915,9 +944,43 @@ object GeminiAiHelper {
                 .mapNotNull { idMap[it] }
                 .distinctBy { it.id }
                 .toList()
-
-            val finalQueue = if (picked.isNotEmpty()) picked else library.shuffled().take(15)
-            intro to finalQueue
+            if (picked.isNotEmpty()) {
+                return@withContext Result.success(intro to picked)
+            }
         }
+
+        // Smart on-device AI DJ scoring engine (works even offline!)
+        val lowerMood = moodPrompt.lowercase()
+        val keywords = lowerMood.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
+        val scored = library.map { song ->
+            val meta = "${song.title} ${song.artist} ${song.album} ${song.genre}".lowercase()
+            var score = 0
+            for (kw in keywords) {
+                if (meta.contains(kw)) score += 15
+            }
+            when {
+                lowerMood.contains("chill") || lowerMood.contains("night") || lowerMood.contains("rain") || lowerMood.contains("acoustic") -> {
+                    if (meta.contains("chill") || meta.contains("slow") || meta.contains("lofi") || meta.contains("acoustic") || meta.contains("love")) score += 20
+                    if (song.duration in 150_000L..320_000L) score += 5
+                }
+                lowerMood.contains("gym") || lowerMood.contains("workout") || lowerMood.contains("hype") || lowerMood.contains("upbeat") -> {
+                    if (meta.contains("remix") || meta.contains("bass") || meta.contains("pop") || meta.contains("rock") || meta.contains("dance") || meta.contains("phonk")) score += 20
+                    if (song.duration in 110_000L..230_000L) score += 5
+                }
+                lowerMood.contains("throwback") || lowerMood.contains("classic") -> {
+                    if (song.year in 1970..2016) score += 25
+                }
+                lowerMood.contains("focus") || lowerMood.contains("study") -> {
+                    if (meta.contains("instrumental") || meta.contains("piano") || meta.contains("ambient") || meta.contains("ost")) score += 20
+                }
+            }
+            score to song
+        }.sortedByDescending { it.first + (0..9).random() }
+            .map { it.second }
+            .take(15)
+
+        val finalMix = if (scored.isNotEmpty()) scored else library.shuffled().take(15)
+        val intro = "Locked in ${finalMix.size} tracks from your library matched for \"$moodPrompt\"!"
+        Result.success(intro to finalMix)
     }
 }
