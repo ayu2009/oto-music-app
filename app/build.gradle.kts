@@ -3,8 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Automatically generate razor-sharp pure white Material Vector Drawables for the Media3 notification
-// in both drawable-anydpi-v21 (highest DPI priority) and drawable so no blurry Holo PNGs are ever used.
+// 1. Automatically generate razor-sharp pure white Material Vector Drawables for the Media3 notification
 val vectorIcons = mapOf(
     "ic_notif_heart_outline.xml" to """<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -88,9 +87,8 @@ val vectorIcons = mapOf(
 </vector>"""
 )
 
-val drawableDir = file("src/main/res/drawable").apply { mkdirs() }
-val anyDpiDir = file("src/main/res/drawable-anydpi-v21").apply { mkdirs() }
-val valuesDir = file("src/main/res/values").apply { mkdirs() }
+file("src/main/res/drawable").mkdirs()
+file("src/main/res/drawable-anydpi-v21").mkdirs()
 
 vectorIcons.forEach { (name, xml) ->
     file("src/main/res/drawable/$name").writeText(xml)
@@ -109,47 +107,90 @@ media3Aliases.forEach { (name, xml) ->
     file("src/main/res/drawable-anydpi-v21/$name").writeText(xml)
 }
 
-android {
-    namespace = "com.example.otomusic"
-    compileSdk = 34
-
-    defaultConfig {
-        applicationId = "com.example.otomusic"
-        minSdk = 26
-        targetSdk = 34
-        versionCode = 3
-        versionName = "2.1-OtoPro-UltraLowRAM"
+// 2. Automatically wire INTERNET permission, AI Smart DJ card, and 1-Tap Auto-Find Lyrics into source files
+val manifestFile = file("src/main/AndroidManifest.xml")
+if (manifestFile.exists()) {
+    val mText = manifestFile.readText()
+    if (!mText.contains("android.permission.INTERNET")) {
+        manifestFile.writeText(
+            mText.replaceFirst(
+                "<uses-permission",
+                "<uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission"
+            )
+        )
     }
+}
 
-    buildTypes {
-        release {
-            isMinifyEnabled = false
+val mainFile = file("src/main/java/com/example/otomusic/MainActivity.kt")
+if (mainFile.exists()) {
+    var ma = mainFile.readText().replace("\r\n", "\n")
+    if (!ma.contains("showAiDjDialog")) {
+        ma = ma.replace(
+            "val showLyricsOnPlayer = mutableStateOf(false)",
+            """val showLyricsOnPlayer = mutableStateOf(false)
+    val geminiApiKey = mutableStateOf(prefs.getString("gemini_api_key", "") ?: "")
+    val showAiDjDialog = mutableStateOf(false)
+    val showGeminiKeyDialog = mutableStateOf(false)
+    val isAiBusy = mutableStateOf(false)
+    val aiDjIntro = mutableStateOf(prefs.getString("ai_dj_last_intro", "") ?: "")
+    fun saveGeminiApiKey(key: String) {
+        val clean = key.trim()
+        geminiApiKey.value = clean
+        prefs.edit().putString("gemini_api_key", clean).apply()
+    }"""
+        )
+        ma = ma.replace(
+            "onClick = { onShuffleAll(songs) }\n                    )\n                }\n            }\n        }",
+            """onClick = { onShuffleAll(songs) }
+                    )
+                }
+            }
         }
+        item { OtoAiDjHomeCard(state = state) }"""
+        )
+        ma = ma.replace(
+            "state.showTagEditorDialog.value?.let { targetSong ->",
+            """if (state.showAiDjDialog.value) {
+        OtoAiSmartDjDialog(state = state, onPlaySong = onPlaySong, onDismiss = { state.showAiDjDialog.value = false })
     }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+    if (state.showGeminiKeyDialog.value) {
+        OtoGeminiApiKeyDialog(state = state, onDismiss = { state.showGeminiKeyDialog.value = false })
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-    buildFeatures {
-        compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
+    state.showTagEditorDialog.value?.let { targetSong ->"""
+        )
+        mainFile.writeText(ma)
     }
 }
 
-dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.activity:activity-compose:1.8.2")
-    implementation(platform("androidx.compose:compose-bom:2024.02.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.media3:media3-exoplayer:1.2.1")
-    implementation("androidx.media3:media3-session:1.2.1")
-    implementation("io.coil-kt:coil-compose:2.5.0")
-}
+val playerFile = file("src/main/java/com/example/otomusic/OtoPlayerAndSettings.kt")
+if (playerFile.exists()) {
+    var op = playerFile.readText().replace("\r\n", "\n")
+    if (!op.contains("OtoAutoFindLyricsEmptyState")) {
+        op = op.replace(
+            """            if (lines.isEmpty()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "No embedded lyrics found",
+                        color = state.textPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Tap to edit",
+                        color = state.accentColor.value,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
+                    )
+                }
+            }""",
+            """            if (lines.isEmpty()) {
+                OtoAutoFindLyricsEmptyState(state = state, song = song)
+            }"""
+        )
+        op = op.replace(
+            """        text = {
+            OutlinedTextField(
+                value = lyricsText,
+                onValueChange =
