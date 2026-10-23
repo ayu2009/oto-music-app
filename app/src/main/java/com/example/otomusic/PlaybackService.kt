@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
@@ -9,10 +10,32 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
+import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -41,6 +64,16 @@ import coil.memory.MemoryCache
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
 
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
@@ -62,7 +95,6 @@ class PlaybackService : MediaSessionService() {
         override fun onActivityResumed(activity: Activity) {}
         override fun onActivityPaused(activity: Activity) {}
         override fun onActivityStopped(activity: Activity) {
-            // Immediately purge all UI album art bitmaps from RAM when the app is minimized
             Coil.imageLoader(applicationContext).memoryCache?.clear()
             System.gc()
         }
@@ -75,7 +107,6 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Configure global low-RAM RGB_565 ImageLoader (50% less RAM per image, 6 MB max cache)
         Coil.setImageLoader(
             ImageLoader.Builder(applicationContext)
                 .bitmapConfig(Bitmap.Config.RGB_565)
@@ -97,7 +128,6 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // 1. Audio-Only Renderer Factory: skips Video, Subtitle, Metadata, Image & Camera renderers
         val audioOnlyRenderersFactory = RenderersFactory {
                 eventHandler: Handler,
                 _: VideoRendererEventListener,
@@ -114,7 +144,6 @@ class PlaybackService : MediaSessionService() {
             )
         }
 
-        // 2. Ultra-Compact Local Audio Buffer: 384 KB cap instead of ExoPlayer's 13.1 MB default
         val lowRamLoadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(1500, 4000, 400, 800)
             .setTargetBufferBytes(384 * 1024)
@@ -136,8 +165,6 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
-        // 3. Sharp Vector Notification Provider matching Official Oto Music:
-        //    Order: [ Heart (Favorite) ]  [ Previous ]  [ Pause/Play ]  [ Next ]  [ Close ]
         val notificationProvider = object : DefaultMediaNotificationProvider(this) {
             override fun addNotificationActions(
                 mediaSession: MediaSession,
@@ -197,7 +224,6 @@ class PlaybackService : MediaSessionService() {
 
                 super.addNotificationActions(mediaSession, orderedButtons, builder, actionFactory)
 
-                // Center-crop album art to 1:1 square (trims black bars & uses 192x192 RGB_565 = 72 KB RAM)
                 val artUri = p.currentMediaItem?.mediaMetadata?.artworkUri
                 val squareArt = loadSquareArtworkLowRam(artUri)
                 if (squareArt != null) {
@@ -343,9 +369,9 @@ class PlaybackService : MediaSessionService() {
         val midX = w / 2
 
         fun isNearBlack(pixel: Int): Boolean {
-            val r = Color.red(pixel)
-            val g = Color.green(pixel)
-            val b = Color.blue(pixel)
+            val r = AndroidColor.red(pixel)
+            val g = AndroidColor.green(pixel)
+            val b = AndroidColor.blue(pixel)
             return r < 18 && g < 18 && b < 18
         }
 
@@ -411,5 +437,487 @@ class PlaybackService : MediaSessionService() {
             mediaSession = null
         }
         super.onDestroy()
+    }
+}
+
+// ============================================================================
+// 100% GMS-Free Gemini AI Smart DJ & 1-Tap Auto-Find Lyrics UI & HTTPS Client
+// ============================================================================
+
+@Composable
+fun OtoAutoFindLyricsEmptyState(state: OtoUiState, song: Song) {
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = if (state.isAiBusy.value) "Finding lyrics with Gemini AI..." else "No embedded lyrics found",
+            color = state.textPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(Modifier.height(12.dp))
+        Button(
+            enabled = !state.isAiBusy.value,
+            onClick = {
+                if (state.geminiApiKey.value.isBlank()) {
+                    state.showGeminiKeyDialog.value = true
+                } else {
+                    state.isAiBusy.value = true
+                    scope.launch {
+                        val res = GeminiAiHelper.fetchLyricsForSong(state.geminiApiKey.value, song)
+                        state.isAiBusy.value = false
+                        res.onSuccess { fetched ->
+                            state.saveLyricsForSong(song.id, fetched)
+                            Toast.makeText(ctx, "Lyrics saved for offline use!", Toast.LENGTH_SHORT).show()
+                        }.onFailure { err ->
+                            Toast.makeText(ctx, "AI Lyrics error: ${err.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = state.accentColor.value,
+                contentColor = Color.Black
+            ),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (state.isAiBusy.value) "Searching..." else "1-Tap Auto-Find Lyrics",
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "Tap to edit manually",
+            color = state.textSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
+        )
+    }
+}
+
+@Composable
+fun OtoAutoFindLyricsEditButton(
+    state: OtoUiState,
+    song: Song,
+    onLyricsFound: (String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    OutlinedButton(
+        enabled = !state.isAiBusy.value,
+        onClick = {
+            if (state.geminiApiKey.value.isBlank()) {
+                state.showGeminiKeyDialog.value = true
+            } else {
+                state.isAiBusy.value = true
+                scope.launch {
+                    val res = GeminiAiHelper.fetchLyricsForSong(state.geminiApiKey.value, song)
+                    state.isAiBusy.value = false
+                    res.onSuccess { fetched ->
+                        onLyricsFound(fetched)
+                        state.saveLyricsForSong(song.id, fetched)
+                        Toast.makeText(ctx, "Lyrics found & saved!", Toast.LENGTH_SHORT).show()
+                    }.onFailure { err ->
+                        Toast.makeText(ctx, "Error: ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = state.accentColor.value, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (state.isAiBusy.value) "Finding lyrics..." else "1-Tap Auto-Find Lyrics with AI",
+            color = state.accentColor.value,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+fun OtoAiDjHomeCard(state: OtoUiState) {
+    Surface(
+        color = state.surfaceColor,
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clickable { state.showAiDjDialog.value = true }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(state.accentColor.value.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "AI Smart DJ",
+                    tint = state.accentColor.value,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 14.dp)
+            ) {
+                Text(
+                    text = "AI Smart DJ",
+                    color = state.textPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = if (state.aiDjIntro.value.isNotBlank()) state.aiDjIntro.value
+                    else "Tap to let your AI DJ mix songs from your offline library",
+                    color = state.textSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = state.textSecondary
+            )
+        }
+    }
+}
+
+@Composable
+fun OtoAiSmartDjDialog(
+    state: OtoUiState,
+    onPlaySong: (Song, List<Song>?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var moodPrompt by remember { mutableStateOf("") }
+    var djMixResult by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var djMessage by remember { mutableStateOf(state.aiDjIntro.value) }
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+
+    val presetMoods = listOf(
+        "Late Night Chill",
+        "Gym & Workout Hype",
+        "Feel-Good Upbeat",
+        "Deep Focus & Study",
+        "Rainy Day Acoustic",
+        "Throwback Classics"
+    )
+
+    fun triggerDjMix(promptToRun: String) {
+        if (state.geminiApiKey.value.isBlank()) {
+            state.showGeminiKeyDialog.value = true
+            return
+        }
+        if (state.allSongs.isEmpty()) {
+            Toast.makeText(ctx, "No offline songs found in library yet!", Toast.LENGTH_SHORT).show()
+            return
+        }
+        state.isAiBusy.value = true
+        scope.launch {
+            val res = GeminiAiHelper.buildSmartDjQueue(
+                apiKey = state.geminiApiKey.value,
+                moodPrompt = promptToRun,
+                library = state.allSongs.toList()
+            )
+            state.isAiBusy.value = false
+            res.onSuccess { (intro, matchedSongs) ->
+                djMessage = intro
+                djMixResult = matchedSongs
+                state.aiDjIntro.value = intro
+                state.prefs.edit().putString("ai_dj_last_intro", intro).apply()
+                if (matchedSongs.isNotEmpty()) {
+                    onPlaySong(matchedSongs.first(), matchedSongs)
+                    Toast.makeText(ctx, "AI DJ started playing ${matchedSongs.size} tracks!", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure { err ->
+                Toast.makeText(ctx, "AI DJ error: ${err.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = state.surfaceColor,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = state.accentColor.value)
+                    Spacer(Modifier.width(8.dp))
+                    Text("AI Smart DJ", color = state.textPrimary, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                }
+                TextButton(onClick = { state.showGeminiKeyDialog.value = true }) {
+                    Text("API Key", color = state.accentColor.value, fontSize = 12.sp)
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Pick a quick vibe or type what you want to hear from your offline library:",
+                    color = state.textSecondary,
+                    fontSize = 13.sp
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(presetMoods) { mood ->
+                        FilterChip(
+                            selected = moodPrompt == mood,
+                            onClick = {
+                                moodPrompt = mood
+                                triggerDjMix(mood)
+                            },
+                            label = { Text(mood, fontSize = 12.sp) }
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = moodPrompt,
+                    onValueChange = { moodPrompt = it },
+                    placeholder = { Text("e.g. Energetic night drive, relaxing melodies...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (state.isAiBusy.value) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = state.accentColor.value,
+                            strokeWidth = 2.dp
+                        )
+                        Text("AI DJ is mixing your offline tracks...", color = state.textPrimary, fontSize = 13.sp)
+                    }
+                } else if (djMessage.isNotBlank()) {
+                    Surface(
+                        color = state.cardColor,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "DJ Note: $djMessage",
+                                color = state.textPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            if (djMixResult.isNotEmpty()) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = "Up next: " + djMixResult.take(4).joinToString(", ") { it.title },
+                                    color = state.textSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !state.isAiBusy.value,
+                onClick = {
+                    val q = moodPrompt.ifBlank { "Best mix of my favorite and top songs" }
+                    triggerDjMix(q)
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = state.accentColor.value,
+                    contentColor = Color.Black
+                )
+            ) {
+                Text("Mix & Play", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = state.textSecondary)
+            }
+        }
+    )
+}
+
+@Composable
+fun OtoGeminiApiKeyDialog(
+    state: OtoUiState,
+    onDismiss: () -> Unit
+) {
+    var keyInput by remember { mutableStateOf(state.geminiApiKey.value) }
+    val ctx = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = state.surfaceColor,
+        title = { Text("Gemini AI API Key", color = state.textPrimary, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Paste your free Gemini API key from Google AI Studio (aistudio.google.com/app/apikey). Uses direct HTTPS with zero Google Play Services and zero background RAM.",
+                    color = state.textSecondary,
+                    fontSize = 13.sp
+                )
+                OutlinedTextField(
+                    value = keyInput,
+                    onValueChange = { keyInput = it },
+                    placeholder = { Text("AIzaSy...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                state.saveGeminiApiKey(keyInput)
+                Toast.makeText(ctx, "Gemini API Key saved!", Toast.LENGTH_SHORT).show()
+                onDismiss()
+            }) {
+                Text("Save", color = state.accentColor.value, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = state.textSecondary)
+            }
+        }
+    )
+}
+
+object GeminiAiHelper {
+    private val MODELS = listOf("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
+
+    suspend fun callGeminiPrompt(apiKey: String, prompt: String): Result<String> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("API key is empty"))
+        }
+
+        var lastError: Exception? = null
+        for (model in MODELS) {
+            try {
+                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$cleanKey"
+                val conn = (URL(endpoint).openConnection() as HttpsURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 12000
+                    readTimeout = 20000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                }
+
+                val payload = JSONObject().apply {
+                    put(
+                        "contents",
+                        JSONArray().put(
+                            JSONObject().put(
+                                "parts",
+                                JSONArray().put(JSONObject().put("text", prompt))
+                            )
+                        )
+                    )
+                }
+
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                    writer.write(payload.toString())
+                    writer.flush()
+                }
+
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val responseStr = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
+                    val json = JSONObject(responseStr)
+                    val candidates = json.optJSONArray("candidates")
+                    val first = candidates?.optJSONObject(0)
+                    val content = first?.optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    val text = parts?.optJSONObject(0)?.optString("text")?.trim()
+                    if (!text.isNullOrEmpty()) {
+                        return@withContext Result.success(text)
+                    }
+                } else {
+                    val errStr = try {
+                        BufferedReader(InputStreamReader(conn.errorStream, Charsets.UTF_8)).use { it.readText() }
+                    } catch (_: Exception) {
+                        "HTTP $code"
+                    }
+                    lastError = IllegalStateException("HTTP $code: ${errStr.take(120)}")
+                }
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        Result.failure(lastError ?: IllegalStateException("Failed to reach Gemini API"))
+    }
+
+    suspend fun fetchLyricsForSong(apiKey: String, song: Song): Result<String> {
+        val cleanArtist = if (song.artist.equals("<unknown>", ignoreCase = true)) "" else " by \"${song.artist}\""
+        val prompt = """
+            Find the complete, accurate lyrics for the song "${song.title}"$cleanArtist.
+            Rules:
+            - Output ONLY the plain song lyrics line by line.
+            - Do NOT include markdown code blocks, titles, or introductory commentary.
+            - If you are not sure of exact word-for-word lyrics, provide the known verses/chorus cleanly.
+        """.trimIndent()
+        return callGeminiPrompt(apiKey, prompt)
+    }
+
+    suspend fun buildSmartDjQueue(
+        apiKey: String,
+        moodPrompt: String,
+        library: List<Song>
+    ): Result<Pair<String, List<Song>>> {
+        val sample = library.take(150)
+        val catalogLines = sample.joinToString("\n") { s ->
+            "${s.id}|${s.title.replace("|", " ")}|${s.artist.replace("|", " ")}|${s.genre.replace("|", " ")}"
+        }
+        val prompt = """
+            You are an expert AI Music DJ inside an offline music player.
+            User request / mood: "$moodPrompt"
+            
+            Here is the user's local song catalog (format: ID|Title|Artist|Genre):
+            $catalogLines
+            
+            Select between 8 and 20 songs from this catalog that best fit the requested mood and flow well together.
+            Reply in EXACTLY two lines:
+            Line 1: A short, energetic 1-sentence DJ intro (max 18 words) describing the mix.
+            Line 2: ONLY the comma-separated numerical IDs of the selected songs in playback order (for example: 102,45,88,19).
+        """.trimIndent()
+
+        return callGeminiPrompt(apiKey, prompt).mapCatching { reply ->
+            val nonBlank = reply.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val intro = nonBlank.firstOrNull()?.removePrefix("Line 1:")?.trim()
+                ?: "Spinning your custom AI DJ mix!"
+            val idsText = nonBlank.drop(1).joinToString(" ")
+            val idMap = library.associateBy { it.id }
+            val picked = Regex("\\d+").findAll(idsText)
+                .mapNotNull { it.value.toLongOrNull() }
+                .mapNotNull { idMap[it] }
+                .distinctBy { it.id }
+                .toList()
+
+            val finalQueue = if (picked.isNotEmpty()) picked else library.shuffled().take(15)
+            intro to finalQueue
+        }
     }
 }
