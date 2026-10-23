@@ -128,7 +128,7 @@ if (mainFile.exists()) {
         ma = ma.replace(
             "val showLyricsOnPlayer = mutableStateOf(false)",
             """val showLyricsOnPlayer = mutableStateOf(false)
-    val geminiApiKey = mutableStateOf(prefs.getString("gemini_api_key", "") ?: "")
+    val geminiApiKey = mutableStateOf(prefs.getString("gemini_api_key", "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ") ?: "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ")
     val showAiDjDialog = mutableStateOf(false)
     val showGeminiKeyDialog = mutableStateOf(false)
     val isAiBusy = mutableStateOf(false)
