@@ -6,7 +6,7 @@ plugins {
 // 1. Generate razor-sharp pure white Material Vector Drawables for the Media3 notification
 val vectorIcons = mapOf(
     "ic_notif_heart_outline.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -16,7 +16,7 @@ val vectorIcons = mapOf(
         android:pathData="M16.5,3C14.76,3 13.09,3.81 12,5.09C10.91,3.81 9.24,3 7.5,3C4.42,3 2,5.42 2,8.5C2,12.28 5.4,15.36 10.55,20.04L12,21.35L13.45,20.03C18.6,15.36 22,12.28 22,8.5C22,5.42 19.58,3 16.5,3ZM12.1,18.55L12,18.65L11.9,18.55C7.14,14.24 4,11.39 4,8.5C4,6.5 5.5,5 7.5,5C9.04,5 10.54,5.99 11.07,7.36H12.94C13.46,5.99 14.96,5 16.5,5C18.5,5 20,6.5 20,8.5C20,11.39 16.86,14.24 12.1,18.55Z" />
 </vector>""",
     "ic_notif_heart_filled.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -26,7 +26,7 @@ val vectorIcons = mapOf(
         android:pathData="M12,21.35L10.55,20.03C5.4,15.36 2,12.28 2,8.5C2,5.42 4.42,3 7.5,3C9.24,3 10.91,3.81 12,5.09C13.09,3.81 14.76,3 16.5,3C19.58,3 22,5.42 22,8.5C22,12.28 18.6,15.36 13.45,20.04L12,21.35Z" />
 </vector>""",
     "ic_notif_prev.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -36,7 +36,7 @@ val vectorIcons = mapOf(
         android:pathData="M6,6h2v12H6V6zM9.5,12l8.5,6V6L9.5,12z" />
 </vector>""",
     "ic_notif_pause.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -46,7 +46,7 @@ val vectorIcons = mapOf(
         android:pathData="M5.5,3.5h4.5v17H5.5V3.5zM14,3.5h4.5v17H14V3.5z" />
 </vector>""",
     "ic_notif_play.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -56,7 +56,7 @@ val vectorIcons = mapOf(
         android:pathData="M6.5,3.5v17l13,-8.5L6.5,3.5z" />
 </vector>""",
     "ic_notif_next.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -66,7 +66,7 @@ val vectorIcons = mapOf(
         android:pathData="M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z" />
 </vector>""",
     "ic_notif_close.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -76,7 +76,7 @@ val vectorIcons = mapOf(
         android:pathData="M18.3,7.11L16.89,5.7 12,10.59 7.11,5.7 5.7,7.11 10.59,12 5.7,16.89 7.11,18.3 12,13.41 16.89,18.3 18.3,16.89 13.41,12 18.3,7.11z" />
 </vector>""",
     "ic_notif_music_note.xml" to """<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<vector xmlns:android="[http://schemas.android.com/apk/res/android](http://schemas.android.com/apk/res/android)"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
@@ -127,6 +127,51 @@ if (manifestFile.exists()) {
     manifestFile.writeText(mText)
 }
 
+// 2.5 Auto-sanitize Kotlin source files to strip any accidental Markdown code fences (```) at top/bottom
+fun sanitizeKotlinSource(targetFile: java.io.File, cleanHeader: String) {
+    if (!targetFile.exists()) return
+    var text = targetFile.readText().replace("\r\n", "\n").replace("\uFEFF", "")
+    // Remove any line that is a markdown fence or starts/ends with backticks
+    text = text.lines()
+        .map { line -> line.trimEnd('`') }
+        .filterNot { line -> line.trim().startsWith("`") }
+        .joinToString("\n")
+    // Strip any leftover AI block if present in PlaybackService.kt
+    val aiMarker = text.indexOf("@Composable\nfun OtoAutoFindLyricsEmptyState")
+    if (aiMarker != -1) {
+        text = text.substring(0, aiMarker)
+    }
+    // Force exact clean @file:OptIn + package header before the first import statement
+    val importIdx = text.indexOf("\nimport ").let { if (it == -1 && text.startsWith("import ")) 0 else it }
+    if (importIdx != -1) {
+        text = cleanHeader + "\n\n" + text.substring(importIdx).trimStart('\n')
+    }
+    // Strip anything after the final closing brace '}'
+    val lastBrace = text.lastIndexOf('}')
+    if (lastBrace != -1) {
+        text = text.substring(0, lastBrace + 1) + "\n"
+    }
+    // Balance braces if an extra '}' was ever pasted at the end
+    while (text.count { it == '}' } > text.count { it == '{' } && text.trimEnd().endsWith("}")) {
+        val idx = text.lastIndexOf('}')
+        text = text.substring(0, idx).trimEnd() + "\n"
+    }
+    targetFile.writeText(text)
+}
+
+sanitizeKotlinSource(
+    file("src/main/java/com/example/otomusic/MainActivity.kt"),
+    "@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)\n@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)\npackage com.example.otomusic"
+)
+sanitizeKotlinSource(
+    file("src/main/java/com/example/otomusic/OtoPlayerAndSettings.kt"),
+    "@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)\npackage com.example.otomusic"
+)
+sanitizeKotlinSource(
+    file("src/main/java/com/example/otomusic/PlaybackService.kt"),
+    "@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)\npackage com.example.otomusic"
+)
+
 // 3. Patch MainActivity.kt:
 //    - Remove Equalizer & Listening Stats from Drawer, SearchBar, Folders top bar
 //    - Persist deleted_song_ids in SharedPreferences so deleted songs NEVER come back on reopen
@@ -154,11 +199,19 @@ if (mainFile.exists()) {
         if (!deletedSongIds.contains(song.id)) {
             deletedSongIds.add(song.id)
         }
-        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).apply()
+        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).commit()
         allSongs.removeAll { it.id == song.id }
         queue.removeAll { it.id == song.id }
         favoriteIds.remove(song.id)
         historyIds.remove(song.id)
+        playlists.forEachIndexed { idx, pl ->
+            if (pl.songIds.contains(song.id)) {
+                playlists[idx] = pl.copy(songIds = pl.songIds.filter { it != song.id })
+            }
+        }
+        if (currentSong.value?.id == song.id) {
+            currentSong.value = queue.firstOrNull() ?: allSongs.firstOrNull()
+        }
         try {
             context.contentResolver.delete(song.contentUri, null, null)
         } catch (_: Throwable) {}
@@ -174,6 +227,7 @@ if (mainFile.exists()) {
             """val id = cursor.getLong(idCol)
                 if (uiState.deletedSongIds.contains(id)) continue"""
         )
+        // Save last_played_song_id when playing or transitioning so background service always knows what to play
         ma = ma.replace(
             "uiState.recordPlay(song)",
             """uiState.recordPlay(song)
@@ -184,6 +238,7 @@ if (mainFile.exists()) {
             """uiState.recordPlay(found)
                     uiState.savePrefString("last_played_song_id", found.id.toString())"""
         )
+        // Sync MainActivity UI with already-loaded PlaybackService item on startup
         ma = ma.replace(
             "setupControllerListener()\n                requestAudioSessionId()",
             """setupControllerListener()
@@ -199,6 +254,7 @@ if (mainFile.exists()) {
                     }
                 }"""
         )
+        // Remove Equalizer & Listening stats from Drawer
         ma = ma.replace(
             "            Triple(\"equalizer\", \"Equalizer\", Icons.Default.Equalizer) to null,\n",
             ""
@@ -211,6 +267,7 @@ if (mainFile.exists()) {
             "\"All Pro themes, stats, sleep timer & audio features unlocked. 100% free of Google Play Services.\"",
             "\"All Pro themes, sleep timer & offline audio features unlocked. 100% free of Google Play Services.\""
         )
+        // Remove Equalizer icon from SearchBar and Folders top bar
         ma = ma.replace(
             """            } else {
                 IconButton(onClick = onOpenEqualizer) {
@@ -240,6 +297,7 @@ if (mainFile.exists()) {
 val playerFile = file("src/main/java/com/example/otomusic/OtoPlayerAndSettings.kt")
 if (playerFile.exists()) {
     var op = playerFile.readText().replace("\r\n", "\n")
+    // Pull right pane down to bottom-center in landscape mode
     op = op.replace(
         """                // Right Pane: Seekbar, Title/Artist, Controls, Volume Slider, Audio Info, Bottom 5 Action Icons
                 Column(
@@ -259,6 +317,7 @@ if (playerFile.exists()) {
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {"""
     )
+    // Remove Equalizer from More Options sheet
     op = op.replace(
         """                            MoreSheetRow(Icons.Default.Equalizer, "Equalizer", state) {
                                 onDismiss()
@@ -266,6 +325,7 @@ if (playerFile.exists()) {
                             }""",
         ""
     )
+    // Remove Equalizer card from Audio Settings
     op = op.replace(
         """        OtoSettingsCard(
             icon = Icons.Default.Equalizer,
@@ -276,6 +336,7 @@ if (playerFile.exists()) {
         )""",
         ""
     )
+    // Fix permanent song deletion
     op = op.replace(
         """                            MoreSheetRow(Icons.Default.Delete, "Delete from device", state) {
                                 state.allSongs.removeAll { it.id == song.id }
