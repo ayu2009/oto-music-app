@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+```kotlin
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
@@ -6,40 +6,22 @@ import android.app.Activity
 import android.app.Application
 import android.app.PendingIntent
 import android.content.ComponentCallbacks2
+import android.content.ContentUris
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color as AndroidColor
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
-import android.widget.Toast
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -64,21 +46,18 @@ import coil.memory.MemoryCache
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.URL
-import java.net.URLEncoder
-import javax.net.ssl.HttpsURLConnection
 
+/**
+ * Rock-Solid Background Playback Service (100% Offline, Zero Google Play Services).
+ * - Automatically reloads the user's MediaStore queue & last played track inside the service
+ *   whenever resumed from the notification (even hours after the app was closed or killed).
+ * - Never calls .recycle() on live notification Bitmaps (fixing "Oto Music stopped" parcel crashes).
+ * - Uses C.WAKE_MODE_LOCAL so the CPU never drops audio while the screen is off.
+ * - Uses sharp vector icons in Official Oto Music order: [ Heart ] [ Prev ] [ Play/Pause ] [ Next ] [ Close ]
+ */
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
-    private lateinit var player: ExoPlayer
+    private lateinit var exoPlayer: ExoPlayer
     private lateinit var prefs: SharedPreferences
     private var cachedArtUri: Uri? = null
     private var cachedSquareBitmap: Bitmap? = null
@@ -96,30 +75,35 @@ class PlaybackService : MediaSessionService() {
         override fun onActivityResumed(activity: Activity) {}
         override fun onActivityPaused(activity: Activity) {}
         override fun onActivityStopped(activity: Activity) {
-            Coil.imageLoader(applicationContext).memoryCache?.clear()
-            System.gc()
+            try {
+                Coil.imageLoader(applicationContext).memoryCache?.clear()
+            } catch (_: Throwable) {}
         }
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
-            Coil.imageLoader(applicationContext).memoryCache?.clear()
+            try {
+                Coil.imageLoader(applicationContext).memoryCache?.clear()
+            } catch (_: Throwable) {}
         }
     }
 
     override fun onCreate() {
         super.onCreate()
 
-        Coil.setImageLoader(
-            ImageLoader.Builder(applicationContext)
-                .bitmapConfig(Bitmap.Config.RGB_565)
-                .allowHardware(false)
-                .memoryCache {
-                    MemoryCache.Builder(applicationContext)
-                        .maxSizeBytes(6 * 1024 * 1024)
-                        .build()
-                }
-                .build()
-        )
-        application.registerActivityLifecycleCallbacks(activityRamCleaner)
+        try {
+            Coil.setImageLoader(
+                ImageLoader.Builder(applicationContext)
+                    .bitmapConfig(Bitmap.Config.RGB_565)
+                    .allowHardware(false)
+                    .memoryCache {
+                        MemoryCache.Builder(applicationContext)
+                            .maxSizeBytes(6 * 1024 * 1024)
+                            .build()
+                    }
+                    .build()
+            )
+            application.registerActivityLifecycleCallbacks(activityRamCleaner)
+        } catch (_: Throwable) {}
 
         prefs = getSharedPreferences("oto_prefs", MODE_PRIVATE)
         val handleAudioFocus = prefs.getBoolean("lower_volume_on_focal_loss", true)
@@ -146,25 +130,90 @@ class PlaybackService : MediaSessionService() {
         }
 
         val lowRamLoadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(1500, 4000, 400, 800)
-            .setTargetBufferBytes(384 * 1024)
+            .setBufferDurationsMs(5000, 15000, 1000, 2000)
+            .setTargetBufferBytes(2 * 1024 * 1024)
             .setBackBuffer(0, false)
-            .setPrioritizeTimeOverSizeThresholds(false)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        player = ExoPlayer.Builder(this, audioOnlyRenderersFactory)
+        exoPlayer = ExoPlayer.Builder(this, audioOnlyRenderersFactory)
             .setLoadControl(lowRamLoadControl)
             .setAudioAttributes(audioAttributes, handleAudioFocus)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
 
-        player.repeatMode = Player.REPEAT_MODE_OFF
+        exoPlayer.repeatMode = Player.REPEAT_MODE_OFF
 
-        player.addListener(object : Player.Listener {
+        // Preload MediaStore songs into ExoPlayer immediately if service was restarted by notification tap
+        ensureMediaItemsLoaded()
+
+        exoPlayer.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                mediaItem?.mediaId?.let { id ->
+                    prefs.edit()
+                        .putString("last_played_song_id", id)
+                        .putLong("last_played_pos_ms", 0L)
+                        .apply()
+                }
                 updateNotificationCustomLayout()
             }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                exoPlayer.currentMediaItem?.mediaId?.let { id ->
+                    prefs.edit().putString("last_played_song_id", id).apply()
+                }
+                if (!isPlaying) {
+                    prefs.edit()
+                        .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
+                        .apply()
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                if (exoPlayer.hasNextMediaItem()) {
+                    exoPlayer.seekToNextMediaItem()
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                }
+            }
         })
+
+        // Wrap ExoPlayer in a ForwardingPlayer that guarantees songs are loaded & prepared
+        // whenever Play is pressed from a notification after hours in the background.
+        val resilientPlayer = object : ForwardingPlayer(exoPlayer) {
+            override fun play() {
+                ensureMediaItemsLoaded()
+                if (playbackState == Player.STATE_IDLE) {
+                    prepare()
+                } else if (playbackState == Player.STATE_ENDED) {
+                    seekToDefaultPosition()
+                }
+                super.play()
+            }
+
+            override fun setPlayWhenReady(playWhenReady: Boolean) {
+                if (playWhenReady) {
+                    ensureMediaItemsLoaded()
+                    if (playbackState == Player.STATE_IDLE) {
+                        prepare()
+                    } else if (playbackState == Player.STATE_ENDED) {
+                        seekToDefaultPosition()
+                    }
+                }
+                super.setPlayWhenReady(playWhenReady)
+            }
+
+            override fun seekToNext() {
+                ensureMediaItemsLoaded()
+                super.seekToNext()
+            }
+
+            override fun seekToPrevious() {
+                ensureMediaItemsLoaded()
+                super.seekToPrevious()
+            }
+        }
 
         val notificationProvider = object : DefaultMediaNotificationProvider(this) {
             override fun addNotificationActions(
@@ -227,7 +276,7 @@ class PlaybackService : MediaSessionService() {
 
                 val artUri = p.currentMediaItem?.mediaMetadata?.artworkUri
                 val squareArt = loadSquareArtworkLowRam(artUri)
-                if (squareArt != null) {
+                if (squareArt != null && !squareArt.isRecycled) {
                     builder.setLargeIcon(squareArt)
                 }
 
@@ -249,7 +298,7 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaSession.Builder(this, resilientPlayer)
             .setSessionActivity(sessionActivityPendingIntent)
             .setCustomLayout(listOf(buildFavoriteButton(false), buildCloseButton()))
             .setCallback(object : MediaSession.Callback {
@@ -266,6 +315,21 @@ class PlaybackService : MediaSessionService() {
                     return MediaSession.ConnectionResult.accept(cmds, result.availablePlayerCommands)
                 }
 
+                override fun onPlaybackResumption(
+                    mediaSession: MediaSession,
+                    controller: MediaSession.ControllerInfo
+                ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                    val items = querySavedOrAllMediaItems()
+                    val lastId = prefs.getString("last_played_song_id", null)
+                    val startIndex = if (lastId != null) {
+                        items.indexOfFirst { it.mediaId == lastId }.coerceAtLeast(0)
+                    } else 0
+                    val startPos = prefs.getLong("last_played_pos_ms", 0L).coerceAtLeast(0L)
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(items, startIndex, startPos)
+                    )
+                }
+
                 override fun onCustomCommand(
                     session: MediaSession,
                     controller: MediaSession.ControllerInfo,
@@ -274,13 +338,15 @@ class PlaybackService : MediaSessionService() {
                 ): ListenableFuture<SessionResult> {
                     when (customCommand.customAction) {
                         ACTION_CLOSE -> {
-                            clearArtworkCache()
-                            player.stop()
-                            player.clearMediaItems()
+                            prefs.edit()
+                                .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
+                                .apply()
+                            exoPlayer.pause()
+                            exoPlayer.stop()
                             stopSelf()
                         }
                         ACTION_FAVORITE -> {
-                            val currentId = player.currentMediaItem?.mediaId
+                            val currentId = exoPlayer.currentMediaItem?.mediaId
                             if (currentId != null) {
                                 val favs = prefs.getStringSet("favorites", emptySet())?.toMutableSet() ?: mutableSetOf()
                                 if (favs.contains(currentId)) favs.remove(currentId) else favs.add(currentId)
@@ -290,7 +356,7 @@ class PlaybackService : MediaSessionService() {
                         }
                         ACTION_GET_AUDIO_SESSION_ID -> {
                             val resultBundle = Bundle().apply {
-                                putInt(KEY_AUDIO_SESSION_ID, player.audioSessionId)
+                                putInt(KEY_AUDIO_SESSION_ID, exoPlayer.audioSessionId)
                             }
                             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS, resultBundle))
                         }
@@ -299,6 +365,80 @@ class PlaybackService : MediaSessionService() {
                 }
             })
             .build()
+    }
+
+    /**
+     * Ensures ExoPlayer always has the user's offline songs loaded even when PlaybackService
+     * is cold-started in the background by tapping the notification Play button hours later.
+     */
+    private fun ensureMediaItemsLoaded() {
+        if (exoPlayer.mediaItemCount > 0) return
+        val items = querySavedOrAllMediaItems()
+        if (items.isEmpty()) return
+        val lastId = prefs.getString("last_played_song_id", null)
+        val startIndex = if (lastId != null) {
+            items.indexOfFirst { it.mediaId == lastId }.coerceAtLeast(0)
+        } else 0
+        val startPos = prefs.getLong("last_played_pos_ms", 0L).coerceAtLeast(0L)
+        exoPlayer.setMediaItems(items, startIndex, startPos)
+        exoPlayer.prepare()
+    }
+
+    private fun querySavedOrAllMediaItems(): List<MediaItem> {
+        val list = mutableListOf<MediaItem>()
+        try {
+            val deletedSet = prefs.getStringSet("deleted_song_ids", emptySet()) ?: emptySet()
+            val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.ALBUM_ID
+            )
+            val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+            val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
+
+            contentResolver.query(uri, projection, selection, null, sortOrder)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+                val durCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    if (deletedSet.contains(id.toString())) continue
+                    val duration = cursor.getLong(durCol)
+                    if (duration <= 0L) continue
+                    val title = cursor.getString(titleCol)?.takeIf { it.isNotBlank() } ?: "Unknown Title"
+                    val artist = cursor.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
+                    val album = cursor.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
+                    val albumId = cursor.getLong(albumIdCol)
+
+                    val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
+                    val albumArtUri = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId)
+
+                    list.add(
+                        MediaItem.Builder()
+                            .setMediaId(id.toString())
+                            .setUri(contentUri)
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle(title)
+                                    .setArtist(artist)
+                                    .setAlbumTitle(album)
+                                    .setArtworkUri(albumArtUri)
+                                    .build()
+                            )
+                            .build()
+                    )
+                }
+            }
+        } catch (_: Throwable) {}
+        return list
     }
 
     private fun buildFavoriteButton(isFavorite: Boolean): CommandButton {
@@ -319,16 +459,20 @@ class PlaybackService : MediaSessionService() {
 
     private fun updateNotificationCustomLayout() {
         val session = mediaSession ?: return
-        val currentId = player.currentMediaItem?.mediaId
+        val currentId = exoPlayer.currentMediaItem?.mediaId
         val isFav = currentId != null &&
             (prefs.getStringSet("favorites", emptySet())?.contains(currentId) == true)
         session.setCustomLayout(listOf(buildFavoriteButton(isFav), buildCloseButton()))
     }
 
+    /**
+     * Safe 192x192 RGB_565 square artwork loader (never calls .recycle() on notification bitmaps).
+     */
     private fun loadSquareArtworkLowRam(uri: Uri?): Bitmap? {
         if (uri == null) return null
-        if (uri == cachedArtUri && cachedSquareBitmap != null && cachedSquareBitmap?.isRecycled == false) {
-            return cachedSquareBitmap
+        val existing = cachedSquareBitmap
+        if (uri == cachedArtUri && existing != null && !existing.isRecycled) {
+            return existing
         }
         return try {
             val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -352,77 +496,66 @@ class PlaybackService : MediaSessionService() {
             } ?: return null
 
             val cropped = cropBlackBarsAndSquare(raw, targetSize)
-            if (raw != cropped) raw.recycle()
-
-            cachedSquareBitmap?.let { old -> if (old != cropped && !old.isRecycled) old.recycle() }
             cachedArtUri = uri
             cachedSquareBitmap = cropped
             cropped
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
 
     private fun cropBlackBarsAndSquare(src: Bitmap, targetSize: Int): Bitmap {
-        val w = src.width
-        val h = src.height
-        val midY = h / 2
-        val midX = w / 2
+        return try {
+            val w = src.width
+            val h = src.height
+            if (w <= 4 || h <= 4) return src
+            val midY = h / 2
+            val midX = w / 2
 
-        fun isNearBlack(pixel: Int): Boolean {
-            val r = AndroidColor.red(pixel)
-            val g = AndroidColor.green(pixel)
-            val b = AndroidColor.blue(pixel)
-            return r < 18 && g < 18 && b < 18
+            fun isNearBlack(pixel: Int): Boolean {
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+                return r < 18 && g < 18 && b < 18
+            }
+
+            var left = 0
+            while (left < w / 3 && isNearBlack(src.getPixel(left, midY))) left++
+            var right = w - 1
+            while (right > (w * 2) / 3 && isNearBlack(src.getPixel(right, midY))) right--
+            var top = 0
+            while (top < h / 3 && isNearBlack(src.getPixel(midX, top))) top++
+            var bottom = h - 1
+            while (bottom > (h * 2) / 3 && isNearBlack(src.getPixel(midX, bottom))) bottom--
+
+            val contentW = (right - left + 1).coerceAtLeast(1)
+            val contentH = (bottom - top + 1).coerceAtLeast(1)
+            val side = minOf(contentW, contentH).coerceAtLeast(1)
+            val cropX = (left + (contentW - side) / 2).coerceIn(0, (w - side).coerceAtLeast(0))
+            val cropY = (top + (contentH - side) / 2).coerceIn(0, (h - side).coerceAtLeast(0))
+
+            val square = Bitmap.createBitmap(src, cropX, cropY, side, side)
+            Bitmap.createScaledBitmap(square, targetSize, targetSize, true)
+        } catch (_: Throwable) {
+            src
         }
-
-        var left = 0
-        while (left < w / 3 && isNearBlack(src.getPixel(left, midY))) left++
-        var right = w - 1
-        while (right > (w * 2) / 3 && isNearBlack(src.getPixel(right, midY))) right--
-        var top = 0
-        while (top < h / 3 && isNearBlack(src.getPixel(midX, top))) top++
-        var bottom = h - 1
-        while (bottom > (h * 2) / 3 && isNearBlack(src.getPixel(midX, bottom))) bottom--
-
-        val contentW = (right - left + 1).coerceAtLeast(1)
-        val contentH = (bottom - top + 1).coerceAtLeast(1)
-        val side = minOf(contentW, contentH)
-        val cropX = left + (contentW - side) / 2
-        val cropY = top + (contentH - side) / 2
-
-        val square = Bitmap.createBitmap(src, cropX, cropY, side, side)
-        val scaled = Bitmap.createScaledBitmap(square, targetSize, targetSize, true)
-        if (square != src && square != scaled) square.recycle()
-        return scaled
-    }
-
-    private fun clearArtworkCache() {
-        cachedArtUri = null
-        cachedSquareBitmap?.let { if (!it.isRecycled) it.recycle() }
-        cachedSquareBitmap = null
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND || !player.isPlaying) {
-            if (!player.isPlaying) clearArtworkCache()
-            Coil.imageLoader(applicationContext).memoryCache?.clear()
-            System.gc()
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            try {
+                Coil.imageLoader(applicationContext).memoryCache?.clear()
+            } catch (_: Throwable) {}
         }
     }
 
-    override fun onLowMemory() {
-        super.onLowMemory()
-        if (!player.isPlaying) clearArtworkCache()
-        Coil.imageLoader(applicationContext).memoryCache?.clear()
-        System.gc()
-    }
-
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val currentPlayer = mediaSession?.player
-        if (currentPlayer == null || !currentPlayer.playWhenReady || currentPlayer.mediaItemCount == 0) {
-            clearArtworkCache()
+        // Save current playback position when swiped from recents; keep service alive if media is loaded
+        prefs.edit()
+            .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
+            .apply()
+        if (!exoPlayer.playWhenReady && exoPlayer.mediaItemCount == 0) {
             stopSelf()
         }
     }
@@ -430,557 +563,15 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
     override fun onDestroy() {
-        application.unregisterActivityLifecycleCallbacks(activityRamCleaner)
-        clearArtworkCache()
+        try {
+            application.unregisterActivityLifecycleCallbacks(activityRamCleaner)
+        } catch (_: Throwable) {}
         mediaSession?.run {
-            player.release()
+            exoPlayer.release()
             release()
             mediaSession = null
         }
         super.onDestroy()
     }
 }
-
-// ============================================================================
-// 100% GMS-Free Gemini AI Smart DJ & 1-Tap Auto-Find Lyrics UI & HTTPS Client
-// ============================================================================
-
-@Composable
-fun OtoAutoFindLyricsEmptyState(state: OtoUiState, song: Song) {
-    val scope = rememberCoroutineScope()
-    val ctx = LocalContext.current
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = if (state.isAiBusy.value) "Finding lyrics with AI..." else "No embedded lyrics found",
-            color = state.textPrimary,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(12.dp))
-        Button(
-            enabled = !state.isAiBusy.value,
-            onClick = {
-                if (false) {
-                    state.showGeminiKeyDialog.value = true
-                } else {
-                    state.isAiBusy.value = true
-                    scope.launch {
-                        val res = GeminiAiHelper.fetchLyricsForSong(state.geminiApiKey.value, song)
-                        state.isAiBusy.value = false
-                        res.onSuccess { fetched ->
-                            state.saveLyricsForSong(song.id, fetched)
-                            Toast.makeText(ctx, "Lyrics saved for offline use!", Toast.LENGTH_SHORT).show()
-                        }.onFailure { err ->
-                            Toast.makeText(ctx, "AI Lyrics error: ${err.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = state.accentColor.value,
-                contentColor = Color.Black
-            ),
-            shape = RoundedCornerShape(20.dp)
-        ) {
-            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = if (state.isAiBusy.value) "Searching..." else "1-Tap Auto-Find Lyrics",
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "Tap to edit manually",
-            color = state.textSecondary,
-            fontSize = 13.sp,
-            modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
-        )
-    }
-}
-
-@Composable
-fun OtoAutoFindLyricsEditButton(
-    state: OtoUiState,
-    song: Song,
-    onLyricsFound: (String) -> Unit
-) {
-    val scope = rememberCoroutineScope()
-    val ctx = LocalContext.current
-    OutlinedButton(
-        enabled = !state.isAiBusy.value,
-        onClick = {
-            if (false) {
-                state.showGeminiKeyDialog.value = true
-            } else {
-                state.isAiBusy.value = true
-                scope.launch {
-                    val res = GeminiAiHelper.fetchLyricsForSong(state.geminiApiKey.value, song)
-                    state.isAiBusy.value = false
-                    res.onSuccess { fetched ->
-                        onLyricsFound(fetched)
-                        state.saveLyricsForSong(song.id, fetched)
-                        Toast.makeText(ctx, "Lyrics found & saved!", Toast.LENGTH_SHORT).show()
-                    }.onFailure { err ->
-                        Toast.makeText(ctx, "Error: ${err.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = state.accentColor.value, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = if (state.isAiBusy.value) "Finding lyrics..." else "1-Tap Auto-Find Lyrics with AI",
-            color = state.accentColor.value,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
-}
-
-@Composable
-fun OtoAiDjHomeCard(state: OtoUiState) {
-    Surface(
-        color = state.surfaceColor,
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .clickable { state.showAiDjDialog.value = true }
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(state.accentColor.value.copy(alpha = 0.2f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AutoAwesome,
-                    contentDescription = "AI Smart DJ",
-                    tint = state.accentColor.value,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 14.dp)
-            ) {
-                Text(
-                    text = "AI Smart DJ",
-                    color = state.textPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
-                )
-                Text(
-                    text = if (state.aiDjIntro.value.isNotBlank()) state.aiDjIntro.value
-                    else "Tap to let your AI DJ mix songs from your offline library",
-                    color = state.textSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = state.textSecondary
-            )
-        }
-    }
-}
-
-@Composable
-fun OtoAiSmartDjDialog(
-    state: OtoUiState,
-    onPlaySong: (Song, List<Song>?) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var moodPrompt by remember { mutableStateOf("") }
-    var djMixResult by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var djMessage by remember { mutableStateOf(state.aiDjIntro.value) }
-    val scope = rememberCoroutineScope()
-    val ctx = LocalContext.current
-
-    val presetMoods = listOf(
-        "Late Night Chill",
-        "Gym & Workout Hype",
-        "Feel-Good Upbeat",
-        "Deep Focus & Study",
-        "Rainy Day Acoustic",
-        "Throwback Classics"
-    )
-
-    fun triggerDjMix(promptToRun: String) {
-        if (state.allSongs.isEmpty()) {
-            Toast.makeText(ctx, "No offline songs found in library yet!", Toast.LENGTH_SHORT).show()
-            return
-        }
-        state.isAiBusy.value = true
-        scope.launch {
-            val res = GeminiAiHelper.buildSmartDjQueue(
-                apiKey = state.geminiApiKey.value,
-                moodPrompt = promptToRun,
-                library = state.allSongs.toList()
-            )
-            state.isAiBusy.value = false
-            res.onSuccess { (intro, matchedSongs) ->
-                djMessage = intro
-                djMixResult = matchedSongs
-                state.aiDjIntro.value = intro
-                state.prefs.edit().putString("ai_dj_last_intro", intro).apply()
-                if (matchedSongs.isNotEmpty()) {
-                    onPlaySong(matchedSongs.first(), matchedSongs)
-                    Toast.makeText(ctx, "AI DJ started playing ${matchedSongs.size} tracks!", Toast.LENGTH_SHORT).show()
-                }
-            }.onFailure { err ->
-                Toast.makeText(ctx, "AI DJ error: ${err.message}", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = state.surfaceColor,
-        title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = state.accentColor.value)
-                    Spacer(Modifier.width(8.dp))
-                    Text("AI Smart DJ", color = state.textPrimary, fontWeight = FontWeight.Bold, fontSize = 19.sp)
-                }
-                TextButton(onClick = { state.showGeminiKeyDialog.value = true }) {
-                    Text("API Key", color = state.accentColor.value, fontSize = 12.sp)
-                }
-            }
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "Pick a quick vibe or type what you want to hear from your offline library:",
-                    color = state.textSecondary,
-                    fontSize = 13.sp
-                )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(presetMoods) { mood ->
-                        FilterChip(
-                            selected = moodPrompt == mood,
-                            onClick = {
-                                moodPrompt = mood
-                                triggerDjMix(mood)
-                            },
-                            label = { Text(mood, fontSize = 12.sp) }
-                        )
-                    }
-                }
-                OutlinedTextField(
-                    value = moodPrompt,
-                    onValueChange = { moodPrompt = it },
-                    placeholder = { Text("e.g. Energetic night drive, relaxing melodies...") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                if (state.isAiBusy.value) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.padding(vertical = 6.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = state.accentColor.value,
-                            strokeWidth = 2.dp
-                        )
-                        Text("AI DJ is mixing your offline tracks...", color = state.textPrimary, fontSize = 13.sp)
-                    }
-                } else if (djMessage.isNotBlank()) {
-                    Surface(
-                        color = state.cardColor,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(
-                                text = "DJ Note: $djMessage",
-                                color = state.textPrimary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            if (djMixResult.isNotEmpty()) {
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    text = "Up next: " + djMixResult.take(4).joinToString(", ") { it.title },
-                                    color = state.textSecondary,
-                                    fontSize = 12.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = !state.isAiBusy.value,
-                onClick = {
-                    val q = moodPrompt.ifBlank { "Best mix of my favorite and top songs" }
-                    triggerDjMix(q)
-                },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = state.accentColor.value,
-                    contentColor = Color.Black
-                )
-            ) {
-                Text("Mix & Play", fontWeight = FontWeight.Bold)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close", color = state.textSecondary)
-            }
-        }
-    )
-}
-
-@Composable
-fun OtoGeminiApiKeyDialog(
-    state: OtoUiState,
-    onDismiss: () -> Unit
-) {
-    var keyInput by remember { mutableStateOf(state.geminiApiKey.value) }
-    val ctx = LocalContext.current
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = state.surfaceColor,
-        title = { Text("Gemini AI API Key", color = state.textPrimary, fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "Your key is pre-configured! You can also paste an AI Studio key (aistudio.google.com/app/apikey) here anytime.",
-                    color = state.textSecondary,
-                    fontSize = 13.sp
-                )
-                OutlinedTextField(
-                    value = keyInput,
-                    onValueChange = { keyInput = it },
-                    placeholder = { Text("API Key...") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                state.saveGeminiApiKey(keyInput)
-                Toast.makeText(ctx, "Gemini API Key saved!", Toast.LENGTH_SHORT).show()
-                onDismiss()
-            }) {
-                Text("Save", color = state.accentColor.value, fontWeight = FontWeight.Bold)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = state.textSecondary)
-            }
-        }
-    )
-}
-
-object GeminiAiHelper {
-    const val DEFAULT_KEY = "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ"
-    private val MODELS = listOf("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
-
-    suspend fun callGeminiPrompt(apiKey: String, prompt: String): Result<String> = withContext(Dispatchers.IO) {
-        val cleanKey = apiKey.trim().ifEmpty { DEFAULT_KEY }
-
-        var lastError: Exception? = null
-        for (model in MODELS) {
-            try {
-                val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${URLEncoder.encode(cleanKey, "UTF-8")}"
-                val conn = (URL(endpoint).openConnection() as HttpsURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 10000
-                    readTimeout = 16000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                    setRequestProperty("x-goog-api-key", cleanKey)
-                }
-
-                val payload = JSONObject().apply {
-                    put(
-                        "contents",
-                        JSONArray().put(
-                            JSONObject().put(
-                                "parts",
-                                JSONArray().put(JSONObject().put("text", prompt))
-                            )
-                        )
-                    )
-                }
-
-                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                    writer.write(payload.toString())
-                    writer.flush()
-                }
-
-                val code = conn.responseCode
-                if (code in 200..299) {
-                    val responseStr = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
-                    val json = JSONObject(responseStr)
-                    val candidates = json.optJSONArray("candidates")
-                    val first = candidates?.optJSONObject(0)
-                    val content = first?.optJSONObject("content")
-                    val parts = content?.optJSONArray("parts")
-                    val text = parts?.optJSONObject(0)?.optString("text")?.trim()
-                    if (!text.isNullOrEmpty()) {
-                        return@withContext Result.success(text)
-                    }
-                } else {
-                    val errStr = try {
-                        BufferedReader(InputStreamReader(conn.errorStream, Charsets.UTF_8)).use { it.readText() }
-                    } catch (_: Exception) {
-                        "HTTP $code"
-                    }
-                    lastError = IllegalStateException("HTTP $code: ${errStr.take(120)}")
-                }
-            } catch (e: Exception) {
-                lastError = e
-            }
-        }
-        Result.failure(lastError ?: IllegalStateException("Failed to reach Gemini API"))
-    }
-
-    suspend fun fetchLyricsForSong(apiKey: String, song: Song): Result<String> = withContext(Dispatchers.IO) {
-        // 1. Try fast open-source LRCLIB lookup first
-        try {
-            val cleanTitle = song.title
-                .replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")
-                .trim()
-                .ifEmpty { song.title }
-            val cleanArtist = if (song.artist.equals("<unknown>", ignoreCase = true)) "" else song.artist
-            val q = URLEncoder.encode("$cleanTitle $cleanArtist".trim(), "UTF-8")
-            val lrcUrl = "https://lrclib.net/api/search?q=$q"
-            val conn = (URL(lrcUrl).openConnection() as HttpsURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10000
-                readTimeout = 12000
-                setRequestProperty("User-Agent", "OtoMusicOfflinePlayer/2.2")
-            }
-            if (conn.responseCode in 200..299) {
-                val body = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
-                val arr = JSONArray(body)
-                if (arr.length() > 0) {
-                    for (i in 0 until arr.length()) {
-                        val item = arr.getJSONObject(i)
-                        val plain = item.optString("plainLyrics", "").trim()
-                        val synced = item.optString("syncedLyrics", "").trim()
-                            .replace(Regex("\\[\\d{2}:\\d{2}\\.\\d{2,3}\\]\\s*"), "")
-                            .trim()
-                        if (plain.isNotEmpty()) return@withContext Result.success(plain)
-                        if (synced.isNotEmpty()) return@withContext Result.success(synced)
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        // 2. Try Gemini API
-        val cleanArtist = if (song.artist.equals("<unknown>", ignoreCase = true)) "" else " by \"${song.artist}\""
-        val prompt = """
-            Find the complete, accurate lyrics for the song "${song.title}"$cleanArtist.
-            Output ONLY the plain song lyrics line by line with no markdown or commentary.
-        """.trimIndent()
-        callGeminiPrompt(apiKey, prompt)
-    }
-
-    suspend fun buildSmartDjQueue(
-        apiKey: String,
-        moodPrompt: String,
-        library: List<Song>
-    ): Result<Pair<String, List<Song>>> = withContext(Dispatchers.IO) {
-        val sample = library.take(150)
-        val catalogLines = sample.joinToString("\n") { s ->
-            "${s.id}|${s.title.replace("|", " ")}|${s.artist.replace("|", " ")}|${s.genre.replace("|", " ")}"
-        }
-        val prompt = """
-            You are an expert AI Music DJ inside an offline music player.
-            User request / mood: "$moodPrompt"
-            
-            Here is the user's local song catalog (format: ID|Title|Artist|Genre):
-            $catalogLines
-            
-            Select between 8 and 20 songs from this catalog that best fit the requested mood and flow well together.
-            Reply in EXACTLY two lines:
-            Line 1: A short, energetic 1-sentence DJ intro (max 18 words) describing the mix.
-            Line 2: ONLY the comma-separated numerical IDs of the selected songs in playback order (for example: 102,45,88,19).
-        """.trimIndent()
-
-        val geminiRes = callGeminiPrompt(apiKey, prompt)
-        if (geminiRes.isSuccess) {
-            val reply = geminiRes.getOrNull().orEmpty()
-            val nonBlank = reply.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            val intro = nonBlank.firstOrNull()?.removePrefix("Line 1:")?.trim()
-                ?: "Spinning your custom AI DJ mix for $moodPrompt!"
-            val idsText = nonBlank.drop(1).joinToString(" ")
-            val idMap = library.associateBy { it.id }
-            val picked = Regex("\\d+").findAll(idsText)
-                .mapNotNull { it.value.toLongOrNull() }
-                .mapNotNull { idMap[it] }
-                .distinctBy { it.id }
-                .toList()
-            if (picked.isNotEmpty()) {
-                return@withContext Result.success(intro to picked)
-            }
-        }
-
-        // Smart on-device AI DJ scoring engine (works even offline!)
-        val lowerMood = moodPrompt.lowercase()
-        val keywords = lowerMood.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
-        val scored = library.map { song ->
-            val meta = "${song.title} ${song.artist} ${song.album} ${song.genre}".lowercase()
-            var score = 0
-            for (kw in keywords) {
-                if (meta.contains(kw)) score += 15
-            }
-            when {
-                lowerMood.contains("chill") || lowerMood.contains("night") || lowerMood.contains("rain") || lowerMood.contains("acoustic") -> {
-                    if (meta.contains("chill") || meta.contains("slow") || meta.contains("lofi") || meta.contains("acoustic") || meta.contains("love")) score += 20
-                    if (song.duration in 150_000L..320_000L) score += 5
-                }
-                lowerMood.contains("gym") || lowerMood.contains("workout") || lowerMood.contains("hype") || lowerMood.contains("upbeat") -> {
-                    if (meta.contains("remix") || meta.contains("bass") || meta.contains("pop") || meta.contains("rock") || meta.contains("dance") || meta.contains("phonk")) score += 20
-                    if (song.duration in 110_000L..230_000L) score += 5
-                }
-                lowerMood.contains("throwback") || lowerMood.contains("classic") -> {
-                    if (song.year in 1970..2016) score += 25
-                }
-                lowerMood.contains("focus") || lowerMood.contains("study") -> {
-                    if (meta.contains("instrumental") || meta.contains("piano") || meta.contains("ambient") || meta.contains("ost")) score += 20
-                }
-            }
-            score to song
-        }.sortedByDescending { it.first + (0..9).random() }
-            .map { it.second }
-            .take(15)
-
-        val finalMix = if (scored.isNotEmpty()) scored else library.shuffled().take(15)
-        val intro = "Locked in ${finalMix.size} tracks from your library matched for \"$moodPrompt\"!"
-        Result.success(intro to finalMix)
-    }
-}
+```
