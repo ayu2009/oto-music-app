@@ -1,3 +1,4 @@
+```kotlin
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
@@ -46,6 +47,14 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 
+/**
+ * Rock-Solid Background Playback Service (100% Offline, Zero Google Play Services).
+ * - Automatically reloads the user's MediaStore queue & last played track inside the service
+ *   whenever resumed from the notification (even hours after the app was closed or killed).
+ * - Never calls .recycle() on live notification Bitmaps (fixing "Oto Music stopped" parcel crashes).
+ * - Uses C.WAKE_MODE_LOCAL so the CPU never drops audio while the screen is off.
+ * - Uses sharp vector icons in Official Oto Music order: [ Heart ] [ Prev ] [ Play/Pause ] [ Next ] [ Close ]
+ */
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var exoPlayer: ExoPlayer
@@ -121,10 +130,10 @@ class PlaybackService : MediaSessionService() {
         }
 
         val lowRamLoadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(1500, 4000, 400, 800)
-            .setTargetBufferBytes(384 * 1024)
+            .setBufferDurationsMs(5000, 15000, 1000, 2000)
+            .setTargetBufferBytes(2 * 1024 * 1024)
             .setBackBuffer(0, false)
-            .setPrioritizeTimeOverSizeThresholds(false)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         exoPlayer = ExoPlayer.Builder(this, audioOnlyRenderersFactory)
@@ -151,10 +160,21 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                exoPlayer.currentMediaItem?.mediaId?.let { id ->
+                    prefs.edit().putString("last_played_song_id", id).apply()
+                }
                 if (!isPlaying) {
                     prefs.edit()
                         .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
                         .apply()
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                if (exoPlayer.hasNextMediaItem()) {
+                    exoPlayer.seekToNextMediaItem()
+                    exoPlayer.prepare()
+                    exoPlayer.play()
                 }
             }
         })
@@ -166,6 +186,8 @@ class PlaybackService : MediaSessionService() {
                 ensureMediaItemsLoaded()
                 if (playbackState == Player.STATE_IDLE) {
                     prepare()
+                } else if (playbackState == Player.STATE_ENDED) {
+                    seekToDefaultPosition()
                 }
                 super.play()
             }
@@ -175,6 +197,8 @@ class PlaybackService : MediaSessionService() {
                     ensureMediaItemsLoaded()
                     if (playbackState == Player.STATE_IDLE) {
                         prepare()
+                    } else if (playbackState == Player.STATE_ENDED) {
+                        seekToDefaultPosition()
                     }
                 }
                 super.setPlayWhenReady(playWhenReady)
@@ -343,6 +367,10 @@ class PlaybackService : MediaSessionService() {
             .build()
     }
 
+    /**
+     * Ensures ExoPlayer always has the user's offline songs loaded even when PlaybackService
+     * is cold-started in the background by tapping the notification Play button hours later.
+     */
     private fun ensureMediaItemsLoaded() {
         if (exoPlayer.mediaItemCount > 0) return
         val items = querySavedOrAllMediaItems()
@@ -437,6 +465,9 @@ class PlaybackService : MediaSessionService() {
         session.setCustomLayout(listOf(buildFavoriteButton(isFav), buildCloseButton()))
     }
 
+    /**
+     * Safe 192x192 RGB_565 square artwork loader (never calls .recycle() on notification bitmaps).
+     */
     private fun loadSquareArtworkLowRam(uri: Uri?): Bitmap? {
         if (uri == null) return null
         val existing = cachedSquareBitmap
@@ -520,6 +551,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        // Save current playback position when swiped from recents; keep service alive if media is loaded
         prefs.edit()
             .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
             .apply()
@@ -542,3 +574,4 @@ class PlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 }
+```
