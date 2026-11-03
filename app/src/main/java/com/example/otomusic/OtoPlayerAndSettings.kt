@@ -1,3 +1,4 @@
+```kotlin
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 package com.example.otomusic
 
@@ -133,12 +134,13 @@ fun OtoNowPlayingScreen(
                     }
                 }
 
-                // Right Pane: Seekbar, Title/Artist, Controls, Volume Slider, Audio Info, Bottom 5 Action Icons
+                // Right Pane: Pulled down to bottom-center (aligned with bottom row of left pane)
                 Column(
                     modifier = Modifier
                         .weight(0.52f)
-                        .fillMaxHeight(),
-                    verticalArrangement = Arrangement.SpaceBetween,
+                        .fillMaxHeight()
+                        .padding(bottom = 4.dp),
+                    verticalArrangement = Arrangement.Bottom,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     NowPlayingControlsPane(
@@ -784,10 +786,7 @@ fun OtoMoreOptionsSheet(
                 item {
                     Surface(shape = RoundedCornerShape(18.dp), color = state.cardColor, modifier = Modifier.fillMaxWidth()) {
                         Column {
-                            MoreSheetRow(Icons.Default.Equalizer, "Equalizer", state) {
-                                onDismiss()
-                                state.currentScreen.value = "equalizer"
-                            }
+
                             MoreSheetRow(Icons.Default.Speed, "Speed & Pitch", state) {
                                 onDismiss()
                                 state.showSpeedPitchDialog.value = true
@@ -873,9 +872,8 @@ fun OtoMoreOptionsSheet(
                                 onShare()
                             }
                             MoreSheetRow(Icons.Default.Delete, "Delete from device", state) {
-                                state.allSongs.removeAll { it.id == song.id }
-                                state.queue.removeAll { it.id == song.id }
-                                Toast.makeText(context, "Removed from library", Toast.LENGTH_SHORT).show()
+                                state.deleteSongPermanently(song)
+                                Toast.makeText(context, "Deleted permanently", Toast.LENGTH_SHORT).show()
                                 onDismiss()
                             }
                         }
@@ -2116,13 +2114,7 @@ fun OtoAudioSettingsScreen(state: OtoUiState) {
             state.savePrefBoolean("keep_shuffle", it)
         }
 
-        OtoSettingsCard(
-            icon = Icons.Default.Equalizer,
-            title = "Equalizer",
-            subtitle = "Tune EQ bands, bass boost, reverb, and virtualizer.",
-            state = state,
-            onClick = { state.currentScreen.value = "equalizer" }
-        )
+
 
         SettingsCategoryLabel("MISC", state)
         SettingsSwitchCard(
@@ -2605,3 +2597,4 @@ fun OtoTagEditorDialog(state: OtoUiState, song: Song, onDismiss: () -> Unit) {
         }
     )
 }
+```
