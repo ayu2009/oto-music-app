@@ -1,3 +1,4 @@
+```kotlin
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
@@ -225,6 +226,7 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
     val alwaysNavigateFirstArtist = mutableStateOf(prefs.getBoolean("nav_first_artist", false))
     val minDurationFilterSec = mutableIntStateOf(prefs.getInt("min_duration_sec", 0))
     val blacklistedFolders = mutableStateListOf<String>()
+    val deletedSongIds = mutableStateListOf<Long>()
 
     // Playlists & Images Settings
     val lastAddedInterval = mutableStateOf(prefs.getString("last_added_interval", "Past three months") ?: "Past three months")
@@ -268,6 +270,7 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
             historyIds.add(it)
         }
         prefs.getStringSet("blacklist_folders", emptySet())?.forEach { blacklistedFolders.add(it) }
+        prefs.getStringSet("deleted_song_ids", emptySet())?.mapNotNull { it.toLongOrNull() }?.forEach { deletedSongIds.add(it) }
         loadSavedPlaylists()
         loadSavedPlayCounts()
         loadSavedLyrics()
@@ -302,7 +305,7 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
 
     val visibleSongs: List<Song>
         get() = allSongs.filter { song ->
-            val passBlacklist = blacklistedFolders.none { song.folderPath.startsWith(it) }
+            val passBlacklist = !deletedSongIds.contains(song.id) && blacklistedFolders.none { song.folderPath.startsWith(it) }
             val passDuration = song.duration >= (minDurationFilterSec.intValue * 1000L)
             val q = searchQuery.value.trim()
             val passSearch = q.isEmpty() ||
@@ -376,6 +379,31 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
                 .count { it != path && it.startsWith("$path/") }
             FolderItem(name = name, path = path, songs = list, subFolderCount = subFolders)
         }.sortedByDescending { it.songs.size }
+
+    fun deleteSongPermanently(song: Song) {
+        if (!deletedSongIds.contains(song.id)) {
+            deletedSongIds.add(song.id)
+        }
+        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).commit()
+        allSongs.removeAll { it.id == song.id }
+        queue.removeAll { it.id == song.id }
+        favoriteIds.remove(song.id)
+        historyIds.remove(song.id)
+        playlists.forEachIndexed { idx, pl ->
+            if (pl.songIds.contains(song.id)) {
+                playlists[idx] = pl.copy(songIds = pl.songIds.filter { it != song.id })
+            }
+        }
+        if (currentSong.value?.id == song.id) {
+            currentSong.value = queue.firstOrNull() ?: allSongs.firstOrNull()
+        }
+        try {
+            context.contentResolver.delete(song.contentUri, null, null)
+        } catch (_: Throwable) {}
+        try {
+            if (song.path.isNotBlank()) java.io.File(song.path).delete()
+        } catch (_: Throwable) {}
+    }
 
     fun toggleFavorite(song: Song) {
         if (favoriteIds.contains(song.id)) {
@@ -578,7 +606,17 @@ class MainActivity : ComponentActivity() {
             try {
                 mediaController = controllerFuture?.get()
                 setupControllerListener()
-                requestAudioSessionId()
+                mediaController?.let { ctrl ->
+                    uiState.isPlaying.value = ctrl.isPlaying
+                    val activeId = ctrl.currentMediaItem?.mediaId?.toLongOrNull()
+                        ?: uiState.prefs.getString("last_played_song_id", null)?.toLongOrNull()
+                    if (activeId != null) {
+                        uiState.allSongs.find { it.id == activeId }?.let { matched ->
+                            uiState.currentSong.value = matched
+                            uiState.duration.longValue = matched.duration
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -701,6 +739,7 @@ class MainActivity : ComponentActivity() {
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
+                if (uiState.deletedSongIds.contains(id)) continue
                 val title = cursor.getString(titleCol)?.takeIf { it.isNotBlank() } ?: "Unknown Title"
                 val rawArtist = cursor.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
                 val album = cursor.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
@@ -775,6 +814,7 @@ class MainActivity : ComponentActivity() {
                     uiState.currentSong.value = found
                     uiState.duration.longValue = found.duration
                     uiState.recordPlay(found)
+                    uiState.savePrefString("last_played_song_id", found.id.toString())
                 }
                 if (uiState.sleepTimerFinishLastSong.value && uiState.sleepTimerRemainingSec.longValue == -1L) {
                     mediaController?.pause()
@@ -847,6 +887,7 @@ class MainActivity : ComponentActivity() {
         uiState.currentSong.value = song
         uiState.duration.longValue = song.duration
         uiState.recordPlay(song)
+        uiState.savePrefString("last_played_song_id", song.id.toString())
 
         val mediaItems = listToPlay.map { s ->
             MediaItem.Builder()
@@ -1356,8 +1397,6 @@ fun OtoDrawerSheet(
             Triple("library", "Library", Icons.Outlined.LibraryMusic) to state.allSongs.size.toString(),
             Triple("folders", "Folders", Icons.Outlined.Folder) to state.folders.size.toString(),
             Triple("queue", "Playing queue", Icons.Default.QueueMusic) to state.queue.size.toString(),
-            Triple("equalizer", "Equalizer", Icons.Default.Equalizer) to null,
-            Triple("stats", "Listening stats", Icons.Default.BarChart) to null,
             Triple("scan", "Scan media", Icons.Default.Refresh) to null,
             Triple("settings", "Settings", Icons.Outlined.Settings) to null,
             Triple("about", "About", Icons.Outlined.Info) to null
@@ -1426,7 +1465,7 @@ fun OtoDrawerSheet(
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "All Pro themes, stats, sleep timer & audio features unlocked. 100% free of Google Play Services.",
+                    "All Pro themes, sleep timer & offline audio features unlocked. 100% free of Google Play Services.",
                     color = state.textSecondary,
                     fontSize = 12.sp
                 )
@@ -1485,10 +1524,6 @@ fun OtoFloatingSearchBar(
                     state.isSearchActive.value = false
                 }) {
                     Icon(Icons.Default.Close, contentDescription = "Clear", tint = state.textSecondary)
-                }
-            } else {
-                IconButton(onClick = onOpenEqualizer) {
-                    Icon(Icons.Default.Equalizer, contentDescription = "Audio Output / EQ", tint = state.textSecondary)
                 }
             }
         }
@@ -2408,9 +2443,7 @@ fun OtoFoldersScreen(
                     Text("Files", color = state.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text("${folders.size} folders", color = state.textSecondary, fontSize = 12.sp)
                 }
-                IconButton(onClick = { state.currentScreen.value = "equalizer" }) {
-                    Icon(Icons.Default.Equalizer, contentDescription = "Equalizer", tint = state.textSecondary)
-                }
+
             }
 
             Text(
@@ -2627,3 +2660,4 @@ fun formatDuration(ms: Long): String {
         String.format(Locale.US, "%02d:%02d", min, sec)
     }
 }
+```
