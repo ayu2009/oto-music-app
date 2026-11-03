@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 <!--  Offline Media & Audio Permissions (Zero Google Play Services / Zero Internet Tracking)  -->
+<uses-permission android:name="android.permission.WAKE_LOCK"/>
 <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
@@ -14,7 +15,7 @@
 <category android:name="android.intent.category.LAUNCHER"/>
 </intent-filter>
 </activity>
-<service android:name=".PlaybackService" android:foregroundServiceType="mediaPlayback" android:exported="true">
+<service android:name=".PlaybackService" android:stopWithTask="false" android:foregroundServiceType="mediaPlayback" android:exported="true">
 <intent-filter>
 <action android:name="androidx.media3.session.MediaSessionService"/>
 </intent-filter>
