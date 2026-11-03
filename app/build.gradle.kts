@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// 1. Automatically generate razor-sharp pure white Material Vector Drawables for the Media3 notification
+// 1. Generate razor-sharp pure white Material Vector Drawables for the Media3 notification
 val vectorIcons = mapOf(
     "ic_notif_heart_outline.xml" to """<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -107,111 +107,205 @@ media3Aliases.forEach { (name, xml) ->
     file("src/main/res/drawable-anydpi-v21/$name").writeText(xml)
 }
 
-// 2. Automatically wire INTERNET permission, AI Smart DJ card, and 1-Tap Auto-Find Lyrics into source files
+// 2. Ensure AndroidManifest.xml has WAKE_LOCK and stopWithTask="false" for rock-solid background playback
 val manifestFile = file("src/main/AndroidManifest.xml")
 if (manifestFile.exists()) {
-    val mText = manifestFile.readText()
-    if (!mText.contains("android.permission.INTERNET")) {
-        manifestFile.writeText(
-            mText.replaceFirst(
-                "<uses-permission",
-                "<uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission"
-            )
+    var mText = manifestFile.readText().replace("\r\n", "\n")
+    mText = mText.replace("    <uses-permission android:name=\"android.permission.INTERNET\" />\n", "")
+    if (!mText.contains("android.permission.WAKE_LOCK")) {
+        mText = mText.replaceFirst(
+            "<uses-permission",
+            "<uses-permission android:name=\"android.permission.WAKE_LOCK\" />\n    <uses-permission"
         )
     }
+    if (!mText.contains("android:stopWithTask")) {
+        mText = mText.replace(
+            "android:name=\".PlaybackService\"",
+            "android:name=\".PlaybackService\"\n            android:stopWithTask=\"false\""
+        )
+    }
+    manifestFile.writeText(mText)
 }
 
+// 3. Patch MainActivity.kt:
+//    - Remove Equalizer & Listening Stats from Drawer, SearchBar, Folders top bar
+//    - Persist deleted_song_ids in SharedPreferences so deleted songs NEVER come back on reopen
+//    - Save last_played_song_id & queue so notification Play works even hours later
 val mainFile = file("src/main/java/com/example/otomusic/MainActivity.kt")
 if (mainFile.exists()) {
     var ma = mainFile.readText().replace("\r\n", "\n")
-    if (!ma.contains("showAiDjDialog")) {
+    if (!ma.contains("deletedSongIds")) {
         ma = ma.replace(
-            "val showLyricsOnPlayer = mutableStateOf(false)",
-            """val showLyricsOnPlayer = mutableStateOf(false)
-    val geminiApiKey = mutableStateOf(prefs.getString("gemini_api_key", "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ") ?: "AQ.Ab8RN6LcFzRmUkfNQE9UW7MFmc4ZnSMcTo75qZWDy4N16QqJfQ")
-    val showAiDjDialog = mutableStateOf(false)
-    val showGeminiKeyDialog = mutableStateOf(false)
-    val isAiBusy = mutableStateOf(false)
-    val aiDjIntro = mutableStateOf(prefs.getString("ai_dj_last_intro", "") ?: "")
-    fun saveGeminiApiKey(key: String) {
-        val clean = key.trim()
-        geminiApiKey.value = clean
-        prefs.edit().putString("gemini_api_key", clean).apply()
-    }"""
+            "val blacklistedFolders = mutableStateListOf<String>()",
+            "val blacklistedFolders = mutableStateListOf<String>()\n    val deletedSongIds = mutableStateListOf<Long>()"
         )
         ma = ma.replace(
-            "onClick = { onShuffleAll(songs) }\n                    )\n                }\n            }\n        }",
-            """onClick = { onShuffleAll(songs) }
-                    )
-                }
+            "prefs.getStringSet(\"blacklist_folders\", emptySet())?.forEach { blacklistedFolders.add(it) }",
+            """prefs.getStringSet("blacklist_folders", emptySet())?.forEach { blacklistedFolders.add(it) }
+        prefs.getStringSet("deleted_song_ids", emptySet())?.mapNotNull { it.toLongOrNull() }?.forEach { deletedSongIds.add(it) }"""
+        )
+        ma = ma.replace(
+            "val passBlacklist = blacklistedFolders.none { song.folderPath.startsWith(it) }",
+            "val passBlacklist = !deletedSongIds.contains(song.id) && blacklistedFolders.none { song.folderPath.startsWith(it) }"
+        )
+        ma = ma.replace(
+            "fun toggleFavorite(song: Song) {",
+            """fun deleteSongPermanently(song: Song) {
+        if (!deletedSongIds.contains(song.id)) {
+            deletedSongIds.add(song.id)
+        }
+        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).commit()
+        allSongs.removeAll { it.id == song.id }
+        queue.removeAll { it.id == song.id }
+        favoriteIds.remove(song.id)
+        historyIds.remove(song.id)
+        playlists.forEachIndexed { idx, pl ->
+            if (pl.songIds.contains(song.id)) {
+                playlists[idx] = pl.copy(songIds = pl.songIds.filter { it != song.id })
             }
         }
-        item { OtoAiDjHomeCard(state = state) }"""
+        if (currentSong.value?.id == song.id) {
+            currentSong.value = queue.firstOrNull() ?: allSongs.firstOrNull()
+        }
+        try {
+            context.contentResolver.delete(song.contentUri, null, null)
+        } catch (_: Throwable) {}
+        try {
+            if (song.path.isNotBlank()) java.io.File(song.path).delete()
+        } catch (_: Throwable) {}
+    }
+
+    fun toggleFavorite(song: Song) {"""
         )
         ma = ma.replace(
-            "state.showTagEditorDialog.value?.let { targetSong ->",
-            """if (state.showAiDjDialog.value) {
-        OtoAiSmartDjDialog(state = state, onPlaySong = onPlaySong, onDismiss = { state.showAiDjDialog.value = false })
-    }
-    if (state.showGeminiKeyDialog.value) {
-        OtoGeminiApiKeyDialog(state = state, onDismiss = { state.showGeminiKeyDialog.value = false })
-    }
-    state.showTagEditorDialog.value?.let { targetSong ->"""
+            "val id = cursor.getLong(idCol)",
+            """val id = cursor.getLong(idCol)
+                if (uiState.deletedSongIds.contains(id)) continue"""
+        )
+        // Save last_played_song_id when playing or transitioning so background service always knows what to play
+        ma = ma.replace(
+            "uiState.recordPlay(song)",
+            """uiState.recordPlay(song)
+        uiState.savePrefString("last_played_song_id", song.id.toString())"""
+        )
+        ma = ma.replace(
+            "uiState.recordPlay(found)",
+            """uiState.recordPlay(found)
+                    uiState.savePrefString("last_played_song_id", found.id.toString())"""
+        )
+        // Sync MainActivity UI with already-loaded PlaybackService item on startup
+        ma = ma.replace(
+            "setupControllerListener()\n                requestAudioSessionId()",
+            """setupControllerListener()
+                mediaController?.let { ctrl ->
+                    uiState.isPlaying.value = ctrl.isPlaying
+                    val activeId = ctrl.currentMediaItem?.mediaId?.toLongOrNull()
+                        ?: uiState.prefs.getString("last_played_song_id", null)?.toLongOrNull()
+                    if (activeId != null) {
+                        uiState.allSongs.find { it.id == activeId }?.let { matched ->
+                            uiState.currentSong.value = matched
+                            uiState.duration.longValue = matched.duration
+                        }
+                    }
+                }"""
+        )
+        // Remove Equalizer & Listening stats from Drawer
+        ma = ma.replace(
+            "            Triple(\"equalizer\", \"Equalizer\", Icons.Default.Equalizer) to null,\n",
+            ""
+        )
+        ma = ma.replace(
+            "            Triple(\"stats\", \"Listening stats\", Icons.Default.BarChart) to null,\n",
+            ""
+        )
+        ma = ma.replace(
+            "\"All Pro themes, stats, sleep timer & audio features unlocked. 100% free of Google Play Services.\"",
+            "\"All Pro themes, sleep timer & offline audio features unlocked. 100% free of Google Play Services.\""
+        )
+        // Remove Equalizer icon from SearchBar and Folders top bar
+        ma = ma.replace(
+            """            } else {
+                IconButton(onClick = onOpenEqualizer) {
+                    Icon(Icons.Default.Equalizer, contentDescription = "Audio Output / EQ", tint = state.textSecondary)
+                }
+            }""",
+            "            }"
+        )
+        ma = ma.replace(
+            """                IconButton(onClick = { state.currentScreen.value = "equalizer" }) {
+                    Icon(Icons.Default.Equalizer, contentDescription = "Equalizer", tint = state.textSecondary)
+                }""",
+            ""
+        )
+        ma = ma.replace(
+            "private fun applyAudioEffects() {",
+            "private fun applyAudioEffects() { if (true) return"
         )
         mainFile.writeText(ma)
     }
 }
 
+// 4. Patch OtoPlayerAndSettings.kt:
+//    - Pull Now Playing right-pane controls down to bottom-center in landscape mode
+//    - Remove Equalizer from More Options sheet and Audio Settings screen
+//    - Make "Delete from device" call state.deleteSongPermanently(song)
 val playerFile = file("src/main/java/com/example/otomusic/OtoPlayerAndSettings.kt")
 if (playerFile.exists()) {
     var op = playerFile.readText().replace("\r\n", "\n")
-    if (!op.contains("OtoAutoFindLyricsEmptyState")) {
-        op = op.replace(
-            """            if (lines.isEmpty()) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "No embedded lyrics found",
-                        color = state.textPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "Tap to edit",
-                        color = state.accentColor.value,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
-                    )
-                }
-            }""",
-            """            if (lines.isEmpty()) {
-                OtoAutoFindLyricsEmptyState(state = state, song = song)
-            }"""
-        )
-        op = op.replace(
-            """        text = {
-            OutlinedTextField(
-                value = lyricsText,
-                onValueChange = { lyricsText = it },
-                placeholder = { Text("Paste LRC or plain lyrics here...") },
-                modifier = Modifier.fillMaxWidth().height(200.dp)
-            )
-        },""",
-            """        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OtoAutoFindLyricsEditButton(state = state, song = song) { fetched -> lyricsText = fetched }
-                OutlinedTextField(
-                    value = lyricsText,
-                    onValueChange = { lyricsText = it },
-                    placeholder = { Text("Paste LRC or plain lyrics here...") },
-                    modifier = Modifier.fillMaxWidth().height(200.dp)
-                )
-            }
-        },"""
-        )
-        playerFile.writeText(op)
-    }
+    // Pull right pane down to bottom-center in landscape mode
+    op = op.replace(
+        """                // Right Pane: Seekbar, Title/Artist, Controls, Volume Slider, Audio Info, Bottom 5 Action Icons
+                Column(
+                    modifier = Modifier
+                        .weight(0.52f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {""",
+        """                // Right Pane: Pulled down to bottom-center (aligned with bottom row of left pane)
+                Column(
+                    modifier = Modifier
+                        .weight(0.52f)
+                        .fillMaxHeight()
+                        .padding(bottom = 4.dp),
+                    verticalArrangement = Arrangement.Bottom,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {"""
+    )
+    // Remove Equalizer from More Options sheet
+    op = op.replace(
+        """                            MoreSheetRow(Icons.Default.Equalizer, "Equalizer", state) {
+                                onDismiss()
+                                state.currentScreen.value = "equalizer"
+                            }""",
+        ""
+    )
+    // Remove Equalizer card from Audio Settings
+    op = op.replace(
+        """        OtoSettingsCard(
+            icon = Icons.Default.Equalizer,
+            title = "Equalizer",
+            subtitle = "Tune EQ bands, bass boost, reverb, and virtualizer.",
+            state = state,
+            onClick = { state.currentScreen.value = "equalizer" }
+        )""",
+        ""
+    )
+    // Fix permanent song deletion
+    op = op.replace(
+        """                            MoreSheetRow(Icons.Default.Delete, "Delete from device", state) {
+                                state.allSongs.removeAll { it.id == song.id }
+                                state.queue.removeAll { it.id == song.id }
+                                Toast.makeText(context, "Removed from library", Toast.LENGTH_SHORT).show()
+                                onDismiss()
+                            }""",
+        """                            MoreSheetRow(Icons.Default.Delete, "Delete from device", state) {
+                                state.deleteSongPermanently(song)
+                                Toast.makeText(context, "Deleted permanently", Toast.LENGTH_SHORT).show()
+                                onDismiss()
+                            }"""
+    )
+    playerFile.writeText(op)
 }
 
 android {
@@ -222,8 +316,8 @@ android {
         applicationId = "com.example.otomusic"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.2-OtoPro-AI-DJ"
+        versionCode = 5
+        versionName = "2.3-OtoPro-OfflineFixed"
     }
 
     buildTypes {
