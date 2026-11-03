@@ -154,19 +154,11 @@ if (mainFile.exists()) {
         if (!deletedSongIds.contains(song.id)) {
             deletedSongIds.add(song.id)
         }
-        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).commit()
+        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).apply()
         allSongs.removeAll { it.id == song.id }
         queue.removeAll { it.id == song.id }
         favoriteIds.remove(song.id)
         historyIds.remove(song.id)
-        playlists.forEachIndexed { idx, pl ->
-            if (pl.songIds.contains(song.id)) {
-                playlists[idx] = pl.copy(songIds = pl.songIds.filter { it != song.id })
-            }
-        }
-        if (currentSong.value?.id == song.id) {
-            currentSong.value = queue.firstOrNull() ?: allSongs.firstOrNull()
-        }
         try {
             context.contentResolver.delete(song.contentUri, null, null)
         } catch (_: Throwable) {}
@@ -182,7 +174,6 @@ if (mainFile.exists()) {
             """val id = cursor.getLong(idCol)
                 if (uiState.deletedSongIds.contains(id)) continue"""
         )
-        // Save last_played_song_id when playing or transitioning so background service always knows what to play
         ma = ma.replace(
             "uiState.recordPlay(song)",
             """uiState.recordPlay(song)
@@ -193,7 +184,6 @@ if (mainFile.exists()) {
             """uiState.recordPlay(found)
                     uiState.savePrefString("last_played_song_id", found.id.toString())"""
         )
-        // Sync MainActivity UI with already-loaded PlaybackService item on startup
         ma = ma.replace(
             "setupControllerListener()\n                requestAudioSessionId()",
             """setupControllerListener()
@@ -209,7 +199,6 @@ if (mainFile.exists()) {
                     }
                 }"""
         )
-        // Remove Equalizer & Listening stats from Drawer
         ma = ma.replace(
             "            Triple(\"equalizer\", \"Equalizer\", Icons.Default.Equalizer) to null,\n",
             ""
@@ -222,7 +211,6 @@ if (mainFile.exists()) {
             "\"All Pro themes, stats, sleep timer & audio features unlocked. 100% free of Google Play Services.\"",
             "\"All Pro themes, sleep timer & offline audio features unlocked. 100% free of Google Play Services.\""
         )
-        // Remove Equalizer icon from SearchBar and Folders top bar
         ma = ma.replace(
             """            } else {
                 IconButton(onClick = onOpenEqualizer) {
@@ -252,7 +240,6 @@ if (mainFile.exists()) {
 val playerFile = file("src/main/java/com/example/otomusic/OtoPlayerAndSettings.kt")
 if (playerFile.exists()) {
     var op = playerFile.readText().replace("\r\n", "\n")
-    // Pull right pane down to bottom-center in landscape mode
     op = op.replace(
         """                // Right Pane: Seekbar, Title/Artist, Controls, Volume Slider, Audio Info, Bottom 5 Action Icons
                 Column(
@@ -272,7 +259,6 @@ if (playerFile.exists()) {
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {"""
     )
-    // Remove Equalizer from More Options sheet
     op = op.replace(
         """                            MoreSheetRow(Icons.Default.Equalizer, "Equalizer", state) {
                                 onDismiss()
@@ -280,7 +266,6 @@ if (playerFile.exists()) {
                             }""",
         ""
     )
-    // Remove Equalizer card from Audio Settings
     op = op.replace(
         """        OtoSettingsCard(
             icon = Icons.Default.Equalizer,
@@ -291,7 +276,6 @@ if (playerFile.exists()) {
         )""",
         ""
     )
-    // Fix permanent song deletion
     op = op.replace(
         """                            MoreSheetRow(Icons.Default.Delete, "Delete from device", state) {
                                 state.allSongs.removeAll { it.id == song.id }
