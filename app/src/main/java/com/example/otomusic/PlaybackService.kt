@@ -1,4 +1,3 @@
-```kotlin
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
@@ -574,4 +573,3 @@ class PlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 }
-```
