@@ -1,4 +1,3 @@
-```kotlin
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
@@ -2660,4 +2659,3 @@ fun formatDuration(ms: Long): String {
         String.format(Locale.US, "%02d:%02d", min, sec)
     }
 }
-```
