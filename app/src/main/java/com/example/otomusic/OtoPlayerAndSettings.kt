@@ -1,4 +1,3 @@
-```kotlin
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 package com.example.otomusic
 
@@ -2597,4 +2596,3 @@ fun OtoTagEditorDialog(state: OtoUiState, song: Song, onDismiss: () -> Unit) {
         }
     )
 }
-```
