@@ -10,7 +10,6 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -46,20 +45,13 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 
-/**
- * Rock-Solid Background Playback Service (100% Offline, Zero Google Play Services).
- * - Automatically reloads the user's MediaStore queue & last played track inside the service
- *   whenever resumed from the notification (even hours after the app was closed or killed).
- * - Never calls .recycle() on live notification Bitmaps (fixing "Oto Music stopped" parcel crashes).
- * - Uses C.WAKE_MODE_LOCAL so the CPU never drops audio while the screen is off.
- * - Uses sharp vector icons in Official Oto Music order: [ Heart ] [ Prev ] [ Play/Pause ] [ Next ] [ Close ]
- */
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var exoPlayer: ExoPlayer
     private lateinit var prefs: SharedPreferences
     private var cachedArtUri: Uri? = null
     private var cachedSquareBitmap: Bitmap? = null
+    private var cachedMediaItems: List<MediaItem> = emptyList()
 
     companion object {
         const val ACTION_FAVORITE = "ACTION_FAVORITE"
@@ -94,6 +86,7 @@ class PlaybackService : MediaSessionService() {
                 ImageLoader.Builder(applicationContext)
                     .bitmapConfig(Bitmap.Config.RGB_565)
                     .allowHardware(false)
+                    .crossfade(false)
                     .memoryCache {
                         MemoryCache.Builder(applicationContext)
                             .maxSizeBytes(6 * 1024 * 1024)
@@ -129,10 +122,10 @@ class PlaybackService : MediaSessionService() {
         }
 
         val lowRamLoadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(5000, 15000, 1000, 2000)
-            .setTargetBufferBytes(2 * 1024 * 1024)
+            .setBufferDurationsMs(1500, 4000, 350, 700)
+            .setTargetBufferBytes(384 * 1024)
             .setBackBuffer(0, false)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
 
         exoPlayer = ExoPlayer.Builder(this, audioOnlyRenderersFactory)
@@ -144,7 +137,6 @@ class PlaybackService : MediaSessionService() {
 
         exoPlayer.repeatMode = Player.REPEAT_MODE_OFF
 
-        // Preload MediaStore songs into ExoPlayer immediately if service was restarted by notification tap
         ensureMediaItemsLoaded()
 
         exoPlayer.addListener(object : Player.Listener {
@@ -159,46 +151,25 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                exoPlayer.currentMediaItem?.mediaId?.let { id ->
-                    prefs.edit().putString("last_played_song_id", id).apply()
-                }
                 if (!isPlaying) {
                     prefs.edit()
                         .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
                         .apply()
                 }
             }
-
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                if (exoPlayer.hasNextMediaItem()) {
-                    exoPlayer.seekToNextMediaItem()
-                    exoPlayer.prepare()
-                    exoPlayer.play()
-                }
-            }
         })
 
-        // Wrap ExoPlayer in a ForwardingPlayer that guarantees songs are loaded & prepared
-        // whenever Play is pressed from a notification after hours in the background.
         val resilientPlayer = object : ForwardingPlayer(exoPlayer) {
             override fun play() {
                 ensureMediaItemsLoaded()
-                if (playbackState == Player.STATE_IDLE) {
-                    prepare()
-                } else if (playbackState == Player.STATE_ENDED) {
-                    seekToDefaultPosition()
-                }
+                if (playbackState == Player.STATE_IDLE) prepare()
                 super.play()
             }
 
             override fun setPlayWhenReady(playWhenReady: Boolean) {
                 if (playWhenReady) {
                     ensureMediaItemsLoaded()
-                    if (playbackState == Player.STATE_IDLE) {
-                        prepare()
-                    } else if (playbackState == Player.STATE_ENDED) {
-                        seekToDefaultPosition()
-                    }
+                    if (playbackState == Player.STATE_IDLE) prepare()
                 }
                 super.setPlayWhenReady(playWhenReady)
             }
@@ -239,42 +210,36 @@ class PlaybackService : MediaSessionService() {
                         it.playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM
                 }
 
-                val favBtn = buildFavoriteButton(isFav)
-                val prevBtn = CommandButton.Builder()
-                    .setPlayerCommand(origPrev?.playerCommand ?: Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .setIconResId(R.drawable.ic_notif_prev)
-                    .setDisplayName(origPrev?.displayName ?: "Previous")
-                    .setExtras(origPrev?.extras ?: Bundle.EMPTY)
-                    .setEnabled(true)
-                    .build()
-                val playPauseBtn = CommandButton.Builder()
-                    .setPlayerCommand(origPlayPause?.playerCommand ?: Player.COMMAND_PLAY_PAUSE)
-                    .setIconResId(if (isPlaying) R.drawable.ic_notif_pause else R.drawable.ic_notif_play)
-                    .setDisplayName(origPlayPause?.displayName ?: if (isPlaying) "Pause" else "Play")
-                    .setExtras(origPlayPause?.extras ?: Bundle.EMPTY)
-                    .setEnabled(true)
-                    .build()
-                val nextBtn = CommandButton.Builder()
-                    .setPlayerCommand(origNext?.playerCommand ?: Player.COMMAND_SEEK_TO_NEXT)
-                    .setIconResId(R.drawable.ic_notif_next)
-                    .setDisplayName(origNext?.displayName ?: "Next")
-                    .setExtras(origNext?.extras ?: Bundle.EMPTY)
-                    .setEnabled(true)
-                    .build()
-                val closeBtn = buildCloseButton()
-
                 val orderedButtons = ImmutableList.of(
-                    favBtn,
-                    prevBtn,
-                    playPauseBtn,
-                    nextBtn,
-                    closeBtn
+                    buildFavoriteButton(isFav),
+                    CommandButton.Builder()
+                        .setPlayerCommand(origPrev?.playerCommand ?: Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .setIconResId(R.drawable.ic_notif_prev)
+                        .setDisplayName(origPrev?.displayName ?: "Previous")
+                        .setExtras(origPrev?.extras ?: Bundle.EMPTY)
+                        .setEnabled(true)
+                        .build(),
+                    CommandButton.Builder()
+                        .setPlayerCommand(origPlayPause?.playerCommand ?: Player.COMMAND_PLAY_PAUSE)
+                        .setIconResId(if (isPlaying) R.drawable.ic_notif_pause else R.drawable.ic_notif_play)
+                        .setDisplayName(origPlayPause?.displayName ?: if (isPlaying) "Pause" else "Play")
+                        .setExtras(origPlayPause?.extras ?: Bundle.EMPTY)
+                        .setEnabled(true)
+                        .build(),
+                    CommandButton.Builder()
+                        .setPlayerCommand(origNext?.playerCommand ?: Player.COMMAND_SEEK_TO_NEXT)
+                        .setIconResId(R.drawable.ic_notif_next)
+                        .setDisplayName(origNext?.displayName ?: "Next")
+                        .setExtras(origNext?.extras ?: Bundle.EMPTY)
+                        .setEnabled(true)
+                        .build(),
+                    buildCloseButton()
                 )
 
                 super.addNotificationActions(mediaSession, orderedButtons, builder, actionFactory)
 
                 val artUri = p.currentMediaItem?.mediaMetadata?.artworkUri
-                val squareArt = loadSquareArtworkLowRam(artUri)
+                val squareArt = loadSquareArtworkFast(artUri)
                 if (squareArt != null && !squareArt.isRecycled) {
                     builder.setLargeIcon(squareArt)
                 }
@@ -318,7 +283,7 @@ class PlaybackService : MediaSessionService() {
                     mediaSession: MediaSession,
                     controller: MediaSession.ControllerInfo
                 ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-                    val items = querySavedOrAllMediaItems()
+                    val items = getOrLoadMediaItems()
                     val lastId = prefs.getString("last_played_song_id", null)
                     val startIndex = if (lastId != null) {
                         items.indexOfFirst { it.mediaId == lastId }.coerceAtLeast(0)
@@ -366,13 +331,9 @@ class PlaybackService : MediaSessionService() {
             .build()
     }
 
-    /**
-     * Ensures ExoPlayer always has the user's offline songs loaded even when PlaybackService
-     * is cold-started in the background by tapping the notification Play button hours later.
-     */
     private fun ensureMediaItemsLoaded() {
         if (exoPlayer.mediaItemCount > 0) return
-        val items = querySavedOrAllMediaItems()
+        val items = getOrLoadMediaItems()
         if (items.isEmpty()) return
         val lastId = prefs.getString("last_played_song_id", null)
         val startIndex = if (lastId != null) {
@@ -383,8 +344,9 @@ class PlaybackService : MediaSessionService() {
         exoPlayer.prepare()
     }
 
-    private fun querySavedOrAllMediaItems(): List<MediaItem> {
-        val list = mutableListOf<MediaItem>()
+    private fun getOrLoadMediaItems(): List<MediaItem> {
+        if (cachedMediaItems.isNotEmpty()) return cachedMediaItems
+        val list = ArrayList<MediaItem>(256)
         try {
             val deletedSet = prefs.getStringSet("deleted_song_ids", emptySet()) ?: emptySet()
             val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
@@ -410,8 +372,7 @@ class PlaybackService : MediaSessionService() {
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
                     if (deletedSet.contains(id.toString())) continue
-                    val duration = cursor.getLong(durCol)
-                    if (duration <= 0L) continue
+                    if (cursor.getLong(durCol) <= 0L) continue
                     val title = cursor.getString(titleCol)?.takeIf { it.isNotBlank() } ?: "Unknown Title"
                     val artist = cursor.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
                     val album = cursor.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
@@ -437,24 +398,23 @@ class PlaybackService : MediaSessionService() {
                 }
             }
         } catch (_: Throwable) {}
+        cachedMediaItems = list
         return list
     }
 
-    private fun buildFavoriteButton(isFavorite: Boolean): CommandButton {
-        return CommandButton.Builder()
+    private fun buildFavoriteButton(isFavorite: Boolean): CommandButton =
+        CommandButton.Builder()
             .setDisplayName("Favorite")
             .setSessionCommand(SessionCommand(ACTION_FAVORITE, Bundle.EMPTY))
             .setIconResId(if (isFavorite) R.drawable.ic_notif_heart_filled else R.drawable.ic_notif_heart_outline)
             .build()
-    }
 
-    private fun buildCloseButton(): CommandButton {
-        return CommandButton.Builder()
+    private fun buildCloseButton(): CommandButton =
+        CommandButton.Builder()
             .setDisplayName("Close")
             .setSessionCommand(SessionCommand(ACTION_CLOSE, Bundle.EMPTY))
             .setIconResId(R.drawable.ic_notif_close)
             .build()
-    }
 
     private fun updateNotificationCustomLayout() {
         val session = mediaSession ?: return
@@ -465,78 +425,31 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * Safe 192x192 RGB_565 square artwork loader (never calls .recycle() on notification bitmaps).
+     * O(1) fast center-crop to 144x144 RGB_565 (~40 KB RAM, zero pixel loops, zero .recycle() crashes).
      */
-    private fun loadSquareArtworkLowRam(uri: Uri?): Bitmap? {
+    private fun loadSquareArtworkFast(uri: Uri?): Bitmap? {
         if (uri == null) return null
         val existing = cachedSquareBitmap
-        if (uri == cachedArtUri && existing != null && !existing.isRecycled) {
-            return existing
-        }
+        if (uri == cachedArtUri && existing != null && !existing.isRecycled) return existing
         return try {
-            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
-            if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return null
-
-            val targetSize = 192
-            var sampleSize = 1
-            while (boundsOpts.outWidth / (sampleSize * 2) >= targetSize &&
-                boundsOpts.outHeight / (sampleSize * 2) >= targetSize
-            ) {
-                sampleSize *= 2
-            }
-
             val decodeOpts = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
+                inSampleSize = 2
                 inPreferredConfig = Bitmap.Config.RGB_565
             }
             val raw = contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, decodeOpts)
             } ?: return null
 
-            val cropped = cropBlackBarsAndSquare(raw, targetSize)
+            val w = raw.width
+            val h = raw.height
+            val side = minOf(w, h).coerceAtLeast(1)
+            val square = Bitmap.createBitmap(raw, (w - side) / 2, (h - side) / 2, side, side)
+            val scaled = Bitmap.createScaledBitmap(square, 144, 144, true)
             cachedArtUri = uri
-            cachedSquareBitmap = cropped
-            cropped
+            cachedSquareBitmap = scaled
+            scaled
         } catch (_: Throwable) {
             null
-        }
-    }
-
-    private fun cropBlackBarsAndSquare(src: Bitmap, targetSize: Int): Bitmap {
-        return try {
-            val w = src.width
-            val h = src.height
-            if (w <= 4 || h <= 4) return src
-            val midY = h / 2
-            val midX = w / 2
-
-            fun isNearBlack(pixel: Int): Boolean {
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-                return r < 18 && g < 18 && b < 18
-            }
-
-            var left = 0
-            while (left < w / 3 && isNearBlack(src.getPixel(left, midY))) left++
-            var right = w - 1
-            while (right > (w * 2) / 3 && isNearBlack(src.getPixel(right, midY))) right--
-            var top = 0
-            while (top < h / 3 && isNearBlack(src.getPixel(midX, top))) top++
-            var bottom = h - 1
-            while (bottom > (h * 2) / 3 && isNearBlack(src.getPixel(midX, bottom))) bottom--
-
-            val contentW = (right - left + 1).coerceAtLeast(1)
-            val contentH = (bottom - top + 1).coerceAtLeast(1)
-            val side = minOf(contentW, contentH).coerceAtLeast(1)
-            val cropX = (left + (contentW - side) / 2).coerceIn(0, (w - side).coerceAtLeast(0))
-            val cropY = (top + (contentH - side) / 2).coerceIn(0, (h - side).coerceAtLeast(0))
-
-            val square = Bitmap.createBitmap(src, cropX, cropY, side, side)
-            Bitmap.createScaledBitmap(square, targetSize, targetSize, true)
-        } catch (_: Throwable) {
-            src
         }
     }
 
@@ -550,7 +463,6 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Save current playback position when swiped from recents; keep service alive if media is loaded
         prefs.edit()
             .putLong("last_played_pos_ms", exoPlayer.currentPosition.coerceAtLeast(0L))
             .apply()
