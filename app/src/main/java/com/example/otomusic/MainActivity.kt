@@ -69,7 +69,9 @@ import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -302,8 +304,8 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
     val textSecondary: Color
         get() = if (appThemeMode.value == "Light") Color(0xFF49454F) else Color(0xFF9E9AA6)
 
-    val visibleSongs: List<Song>
-        get() = allSongs.filter { song ->
+    val visibleSongs: List<Song> by derivedStateOf {
+        allSongs.filter { song ->
             val passBlacklist = !deletedSongIds.contains(song.id) && blacklistedFolders.none { song.folderPath.startsWith(it) }
             val passDuration = song.duration >= (minDurationFilterSec.intValue * 1000L)
             val q = searchQuery.value.trim()
@@ -321,9 +323,10 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
                 else -> list.sortedByDescending { it.dateModifiedSec }
             }
         }
+    }
 
-    val albums: List<AlbumItem>
-        get() = visibleSongs.groupBy { it.albumId to it.album }.map { (key, list) ->
+    val albums: List<AlbumItem> by derivedStateOf {
+        visibleSongs.groupBy { it.albumId to it.album }.map { (key, list) ->
             val first = list.first()
             AlbumItem(
                 id = key.first,
@@ -341,9 +344,9 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
                 else -> list.sortedBy { it.title.lowercase(Locale.ROOT) }
             }
         }
+    }
 
-    val artists: List<ArtistItem>
-        get() {
+    val artists: List<ArtistItem> by derivedStateOf {
             val map = mutableMapOf<String, MutableList<Song>>()
             for (s in visibleSongs) {
                 val names = if (multiArtistSupport.value) {
@@ -368,34 +371,28 @@ class OtoUiState(val context: Context, val prefs: SharedPreferences) {
                     list.sortedBy { it.name.lowercase(Locale.ROOT) }
                 }
             }
-        }
+    }
 
-    val folders: List<FolderItem>
-        get() = allSongs.groupBy { it.folderPath }.map { (path, list) ->
+    val folders: List<FolderItem> by derivedStateOf {
+        val grouped = visibleSongs.groupBy { it.folderPath }
+        val allPaths = grouped.keys
+        grouped.map { (path, list) ->
             val name = path.substringAfterLast('/').ifEmpty { "Internal Storage" }
-            val subFolders = allSongs.map { it.folderPath }
-                .distinct()
-                .count { it != path && it.startsWith("$path/") }
+            val prefix = "$path/"
+            val subFolders = allPaths.count { it != path && it.startsWith(prefix) }
             FolderItem(name = name, path = path, songs = list, subFolderCount = subFolders)
         }.sortedByDescending { it.songs.size }
+    }
 
     fun deleteSongPermanently(song: Song) {
         if (!deletedSongIds.contains(song.id)) {
             deletedSongIds.add(song.id)
         }
-        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).commit()
+        prefs.edit().putStringSet("deleted_song_ids", deletedSongIds.map { it.toString() }.toSet()).apply()
         allSongs.removeAll { it.id == song.id }
         queue.removeAll { it.id == song.id }
         favoriteIds.remove(song.id)
         historyIds.remove(song.id)
-        playlists.forEachIndexed { idx, pl ->
-            if (pl.songIds.contains(song.id)) {
-                playlists[idx] = pl.copy(songIds = pl.songIds.filter { it != song.id })
-            }
-        }
-        if (currentSong.value?.id == song.id) {
-            currentSong.value = queue.firstOrNull() ?: allSongs.firstOrNull()
-        }
         try {
             context.contentResolver.delete(song.contentUri, null, null)
         } catch (_: Throwable) {}
@@ -690,8 +687,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadSongsFromMediaStore() {
-        uiState.allSongs.clear()
-        val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        lifecycleScope.launch(Dispatchers.IO) {
+            val loadedSongs = ArrayList<Song>(256)
+            val deletedSnapshot = uiState.deletedSongIds.toHashSet()
+            val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = mutableListOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
@@ -738,7 +737,7 @@ class MainActivity : ComponentActivity() {
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
-                if (uiState.deletedSongIds.contains(id)) continue
+                if (deletedSnapshot.contains(id)) continue
                 val title = cursor.getString(titleCol)?.takeIf { it.isNotBlank() } ?: "Unknown Title"
                 val rawArtist = cursor.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
                 val album = cursor.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
@@ -766,7 +765,7 @@ class MainActivity : ComponentActivity() {
                 val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
                 val albumArtUri = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId)
 
-                uiState.allSongs.add(
+                loadedSongs.add(
                     Song(
                         id = id,
                         title = title,
@@ -792,11 +791,17 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
-
-        if (uiState.queue.isEmpty() && uiState.allSongs.isNotEmpty()) {
-            uiState.queue.addAll(uiState.visibleSongs)
-            uiState.currentSong.value = uiState.queue.firstOrNull()
-            uiState.duration.longValue = uiState.currentSong.value?.duration ?: 0L
+        withContext(Dispatchers.Main) {
+            uiState.allSongs.clear()
+            uiState.allSongs.addAll(loadedSongs)
+            if (uiState.queue.isEmpty() && uiState.allSongs.isNotEmpty()) {
+                uiState.queue.addAll(uiState.visibleSongs)
+                val lastId = uiState.prefs.getString("last_played_song_id", null)?.toLongOrNull()
+                val initialSong = uiState.allSongs.find { it.id == lastId } ?: uiState.queue.firstOrNull()
+                uiState.currentSong.value = initialSong
+                uiState.duration.longValue = initialSong?.duration ?: 0L
+            }
+        }
         }
     }
 
@@ -1112,8 +1117,6 @@ fun OtoMainRoot(
                         "library" -> state.currentScreen.value = "main"
                         "folders" -> state.currentScreen.value = "folders"
                         "queue" -> state.currentScreen.value = "queue"
-                        "equalizer" -> state.currentScreen.value = "equalizer"
-                        "stats" -> state.currentScreen.value = "stats"
                         "scan" -> onRescanMedia()
                         "settings" -> state.currentScreen.value = "settings"
                         "about" -> state.currentScreen.value = "about"
@@ -1206,8 +1209,6 @@ fun OtoMainRoot(
                         onPlaySong = onPlaySong,
                         onRemoveFromQueue = onRemoveFromQueue
                     )
-                    "equalizer" -> OtoEqualizerScreen(state = state, onApplyEqualizer = onApplyEqualizer)
-                    "stats" -> OtoListeningStatsScreen(state = state, onPlaySong = onPlaySong)
                     "settings" -> OtoSettingsMainScreen(state = state)
                     "themes" -> OtoThemesAndColorsScreen(state = state)
                     "now_playing_settings" -> OtoNowPlayingSettingsScreen(state = state)
