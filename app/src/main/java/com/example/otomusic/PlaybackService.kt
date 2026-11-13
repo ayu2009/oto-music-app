@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.otomusic
 
@@ -14,6 +15,24 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.provider.MediaStore
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -40,10 +59,13 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import coil.Coil
 import coil.ImageLoader
+import coil.compose.AsyncImage
 import coil.memory.MemoryCache
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
+import java.util.Locale
 
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
@@ -424,9 +446,6 @@ class PlaybackService : MediaSessionService() {
         session.setCustomLayout(listOf(buildFavoriteButton(isFav), buildCloseButton()))
     }
 
-    /**
-     * O(1) fast center-crop to 144x144 RGB_565 (~40 KB RAM, zero pixel loops, zero .recycle() crashes).
-     */
     private fun loadSquareArtworkFast(uri: Uri?): Bitmap? {
         if (uri == null) return null
         val existing = cachedSquareBitmap
@@ -483,5 +502,218 @@ class PlaybackService : MediaSessionService() {
             mediaSession = null
         }
         super.onDestroy()
+    }
+}
+
+data class LrcLine(
+    val timeMs: Long,
+    val text: String
+)
+
+fun parseLrcForSong(state: OtoUiState, song: Song): Pair<Long, List<LrcLine>> {
+    val rawText = state.customLyrics[song.id]?.takeIf { it.isNotBlank() } ?: run {
+        if (song.path.isNotBlank()) {
+            val base = song.path.substringBeforeLast('.')
+            listOf(".lrc", ".txt").firstNotNullOfOrNull { ext ->
+                val f = File(base + ext)
+                if (f.exists() && f.canRead()) runCatching { f.readText() }.getOrNull() else null
+            }
+        } else null
+    } ?: return 0L to emptyList()
+
+    var tagOffsetMs = 0L
+    val offsetRegex = Regex("""^\s*\[offset:\s*([+-]?\d+)\s*]""", RegexOption.IGNORE_CASE)
+    val metaRegex = Regex("""^\s*\[(ti|ar|al|au|by|length|re|ve):.*]""", RegexOption.IGNORE_CASE)
+    val timeRegex = Regex("""\[(\d{2}):(\d{2})(?:[.:](\d{2,3}))?]""")
+
+    val timedLines = mutableListOf<LrcLine>()
+    val plainLines = mutableListOf<String>()
+
+    for (rawLine in rawText.lines()) {
+        val trimmed = rawLine.trim()
+        if (trimmed.isEmpty()) continue
+
+        val offsetMatch = offsetRegex.find(trimmed)
+        if (offsetMatch != null) {
+            tagOffsetMs = offsetMatch.groupValues[1].toLongOrNull() ?: 0L
+            continue
+        }
+        if (metaRegex.matches(trimmed)) continue
+
+        val matches = timeRegex.findAll(trimmed).toList()
+        if (matches.isNotEmpty()) {
+            val lyricText = trimmed.replace(timeRegex, "").trim().ifEmpty { "♪" }
+            for (m in matches) {
+                val min = m.groupValues[1].toLongOrNull() ?: 0L
+                val sec = m.groupValues[2].toLongOrNull() ?: 0L
+                val fracStr = m.groupValues[3]
+                val ms = if (fracStr.isEmpty()) 0L else fracStr.padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+                val totalMs = (min * 60_000L) + (sec * 1_000L) + ms
+                timedLines.add(LrcLine(timeMs = totalMs, text = lyricText))
+            }
+        } else if (!trimmed.startsWith("[")) {
+            plainLines.add(trimmed)
+        }
+    }
+
+    if (timedLines.isNotEmpty()) {
+        return tagOffsetMs to timedLines.sortedBy { it.timeMs }
+    }
+
+    val dur = song.duration.coerceAtLeast(1L)
+    val step = dur / plainLines.size.coerceAtLeast(1)
+    return 0L to plainLines.mapIndexed { idx, line ->
+        LrcLine(timeMs = idx * step, text = line)
+    }
+}
+
+@Composable
+fun NowPlayingArtworkOrLyricsSynced(state: OtoUiState, song: Song) {
+    if (!state.showLyricsOnPlayer.value) {
+        AsyncImage(
+            model = song.albumArtUri,
+            contentDescription = song.title,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+    } else {
+        val (tagOffsetMs, lrcLines) = remember(song.id, state.customLyrics[song.id]) {
+            parseLrcForSong(state, song)
+        }
+        var manualOffsetMs by remember(song.id) {
+            mutableLongStateOf(state.prefs.getLong("lyric_offset_${song.id}", 0L))
+        }
+
+        val currentPosMs = state.currentPosition.longValue
+        val effectivePosMs = (currentPosMs + tagOffsetMs + manualOffsetMs).coerceAtLeast(0L)
+
+        val activeIndex = remember(effectivePosMs, lrcLines) {
+            if (lrcLines.isEmpty()) 0
+            else lrcLines.indexOfLast { effectivePosMs >= it.timeMs }.coerceAtLeast(0)
+        }
+
+        val listState = rememberLazyListState()
+
+        LaunchedEffect(activeIndex, currentPosMs / 1500L, lrcLines.size) {
+            if (lrcLines.isNotEmpty() && activeIndex in lrcLines.indices) {
+                val targetIndex = (activeIndex - 1).coerceAtLeast(0)
+                listState.animateScrollToItem(index = targetIndex)
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(state.surfaceColor)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (lrcLines.isEmpty()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "No embedded lyrics found",
+                        color = state.textPrimary,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Tap to edit",
+                        color = state.accentColor.value,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
+                    )
+                }
+            } else {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = state.cardColor,
+                                modifier = Modifier.clickable {
+                                    manualOffsetMs -= 500L
+                                    state.prefs.edit().putLong("lyric_offset_${song.id}", manualOffsetMs).apply()
+                                }
+                            ) {
+                                Text(
+                                    text = "-0.5s",
+                                    color = state.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Text(
+                                text = String.format(Locale.US, "%+.1fs", manualOffsetMs / 1000f),
+                                color = state.accentColor.value,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable {
+                                    manualOffsetMs = 0L
+                                    state.prefs.edit().putLong("lyric_offset_${song.id}", 0L).apply()
+                                }
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = state.cardColor,
+                                modifier = Modifier.clickable {
+                                    manualOffsetMs += 500L
+                                    state.prefs.edit().putLong("lyric_offset_${song.id}", manualOffsetMs).apply()
+                                }
+                            ) {
+                                Text(
+                                    text = "+0.5s",
+                                    color = state.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "Edit",
+                            color = state.accentColor.value,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { state.showEditLyricsDialog.value = song }
+                        )
+                    }
+
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        contentPadding = PaddingValues(vertical = 80.dp)
+                    ) {
+                        itemsIndexed(lrcLines, key = { idx, item -> "$idx-${item.timeMs}" }) { idx, item ->
+                            val isActive = idx == activeIndex
+                            Text(
+                                text = item.text,
+                                color = if (isActive) state.accentColor.value else state.textSecondary.copy(alpha = 0.55f),
+                                fontSize = if (isActive) 24.sp else 20.sp,
+                                lineHeight = if (isActive) 32.sp else 27.sp,
+                                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp, horizontal = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
