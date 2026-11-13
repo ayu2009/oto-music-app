@@ -106,10 +106,18 @@ media3Aliases.forEach { (name, xml) ->
     file("src/main/res/drawable-anydpi-v21/$name").writeText(xml)
 }
 
-// Single-line safe hook for 120ms position polling and synced LRC lyrics view
 val mainFile = file("src/main/java/com/example/otomusic/MainActivity.kt")
 if (mainFile.exists()) {
-    val ma = mainFile.readText().replace("delay(500L)", "delay(120L)")
+    var ma = mainFile.readText()
+        .replace("return map.map {", "map.map {")
+        .replace("return@derivedStateOf map.map {", "map.map {")
+        .replace("delay(500L)", "delay(120L)")
+    if (!ma.contains("import androidx.compose.runtime.getValue")) {
+        ma = ma.replace(
+            "import androidx.compose.runtime.*",
+            "import androidx.compose.runtime.*\nimport androidx.compose.runtime.getValue"
+        )
+    }
     mainFile.writeText(ma)
 }
 
@@ -130,8 +138,8 @@ android {
         applicationId = "com.example.otomusic"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.5-OtoPro-SyncedLyrics"
+        versionCode = 8
+        versionName = "2.6-OtoPro-SyncedLyrics"
     }
 
     buildTypes {
